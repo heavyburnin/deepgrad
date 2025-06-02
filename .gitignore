@@ -1,4 +1,6 @@
-mnist_train.csv
-mnist_train.bain
-mnist_test.csv
-mnist_test.bin
+examples/mnist_train.csv
+examples/mnist_train.bain
+examples/mnist_test.csv
+examples/mnist_test.bin
+examples/venv
+examples/__pycache__

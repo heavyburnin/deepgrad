@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC -g -shared -Wl,-soname,libsimd_tensor_backend.so -o libsimd_tensor_backend.so CMakeFiles/simd_tensor_backend.dir/src/tensor_ops.c.o 

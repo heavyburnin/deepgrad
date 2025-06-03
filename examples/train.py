@@ -1,10 +1,12 @@
 import struct
+import random
+import os
+import dill
 from tensor import Tensor
 from model import MLP
 from optimizer import SGD
 from tqdm import tqdm
-import random
-import os
+
 
 # CSV to .bin conversion (run once)
 def convert_csv_to_bin(csv_path, bin_path):
@@ -123,6 +125,11 @@ def train():
             })
 
         evaluate(model)
+
+    with open('model.pkl', 'wb') as f:
+        dill.dump(model, f)
+    print("Model saved to model.pkl")
+
 
 if __name__ == '__main__':
     if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):

@@ -24,34 +24,32 @@ static inline float hsum_avx(__m256 v) {
 
 // Custom log approximation for AVX
 static inline __m256 log256_ps(__m256 x) {
-    __m256i exp;
-    __m256 frac;
     __m256 one = _mm256_set1_ps(1.0f);
-    __m256 half = _mm256_set1_ps(0.5f);
+    // Remove the unused 'half' variable
     
-    // Extract exponent and normalize fraction to [1,2)
-    exp = _mm256_sub_epi32(
-        _mm256_srli_epi32(_mm256_castps_si256(x), 23),
-        _mm256_set1_epi32(127)
-    );
+    // Extract exponent
+    __m256i exp = _mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x7F800000));
+    exp = _mm256_srli_epi32(exp, 23);
+    __m256 e = _mm256_cvtepi32_ps(exp);
+    e = _mm256_sub_ps(e, _mm256_set1_ps(127.0f));
     
-    // Build normalized fraction in [1,2)
-    frac = _mm256_or_ps(
-        _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x007FFFFF))),
-        _mm256_castsi256_ps(_mm256_set1_epi32(0x3F800000))
-    );
+    // Extract mantissa and set exponent to 0
+    __m256 m = _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x007FFFFF)));
+    m = _mm256_or_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(0x3F800000))); // Set exponent to 0
     
-    // Polynomial approximation for log(f) where f is in [1,2)
-    __m256 y = _mm256_sub_ps(frac, one);
-    __m256 y2 = _mm256_mul_ps(y, y);
-    __m256 p = _mm256_add_ps(y, _mm256_mul_ps(y2, _mm256_set1_ps(-0.5f)));
-    p = _mm256_add_ps(p, _mm256_mul_ps(_mm256_mul_ps(y2, y), _mm256_set1_ps(0.333333f)));
+    // Minimax polynomial approximation
+    __m256 p = _mm256_set1_ps(0.1512413f);
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-0.5527075f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.9051695f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.0580546f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.9618140f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-0.5822330f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.3465735f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.1760031f));
+    p = _mm256_fmadd_ps(p, _mm256_sub_ps(m, one), e);
     
-    // Combine: log(x) = log(2) * exp + log(frac)
-    return _mm256_add_ps(
-        _mm256_mul_ps(_mm256_cvtepi32_ps(exp), _mm256_set1_ps(0.693147f)),
-        p
-    );
+    // Multiply by ln(2)
+    return _mm256_mul_ps(p, _mm256_set1_ps(0.6931472f));
 }
 
 // SIMD Elementwise Ops
@@ -281,41 +279,97 @@ void tensor_softmax_cross_entropy_with_probs(const float* logits,
 }
 
 void tensor_matmul(const float* A, const float* B, float* C, size_t M, size_t K, size_t N) {
-    // Transpose B for better memory access patterns
+    // Allocate aligned memory for B_transposed
     float* B_transposed = (float*)_mm_malloc(K * N * sizeof(float), 32);
     
-    // Transpose B using SIMD where possible
-    for (size_t j = 0; j < N; j++) {
-        for (size_t k = 0; k < K; k++) {
-            B_transposed[j * K + k] = B[k * N + j];
+    // Transpose B using SIMD for better cache efficiency
+    for (size_t n = 0; n < N; n += 4) {
+        const size_t n_end = (n + 4 <= N) ? n + 4 : N;
+        for (size_t k = 0; k < K; k += 8) {
+            const size_t k_end = (k + 8 <= K) ? k + 8 : K;
+            
+            // Process blocks of the matrix
+            for (size_t j = n; j < n_end; j++) {
+                for (size_t i = k; i < k_end; i++) {
+                    B_transposed[j * K + i] = B[i * N + j];
+                }
+            }
         }
     }
     
     // Zero out C matrix
     memset(C, 0, M * N * sizeof(float));
     
-    // Compute matrix multiplication with SIMD
-    for (size_t i = 0; i < M; i++) {
-        for (size_t j = 0; j < N; j++) {
-            __m256 vsum = _mm256_setzero_ps();
-            size_t k = 0;
+    // Use blocking to improve cache utilization
+    const size_t block_size_m = 32;
+    const size_t block_size_n = 32;
+    const size_t block_size_k = 64;  // Now we'll use this variable
+    
+    // Process blocks of the output matrix
+    for (size_t i_block = 0; i_block < M; i_block += block_size_m) {
+        const size_t i_end = (i_block + block_size_m <= M) ? i_block + block_size_m : M;
+        
+        for (size_t j_block = 0; j_block < N; j_block += block_size_n) {
+            const size_t j_end = (j_block + block_size_n <= N) ? j_block + block_size_n : N;
             
-            // Process 8 elements at a time
-            for (; k + VEC_SIZE <= K; k += VEC_SIZE) {
-                __m256 va = _mm256_loadu_ps(&A[i * K + k]);
-                __m256 vb = _mm256_loadu_ps(&B_transposed[j * K + k]);
-                vsum = _mm256_fmadd_ps(va, vb, vsum);
+            // Process each row in the current block
+            for (size_t i = i_block; i < i_end; i++) {
+                // Process each column in the current block
+                for (size_t j = j_block; j < j_end; j++) {
+                    __m256 vsum1 = _mm256_setzero_ps();
+                    __m256 vsum2 = _mm256_setzero_ps();
+                    __m256 vsum3 = _mm256_setzero_ps();
+                    __m256 vsum4 = _mm256_setzero_ps();
+                    
+                    // Process the inner dimension in blocks using block_size_k
+                    for (size_t k_block = 0; k_block < K; k_block += block_size_k) {
+                        const size_t k_end = (k_block + block_size_k <= K) ? k_block + block_size_k : K;
+                        
+                        // Process within the current k block
+                        for (size_t k = k_block; k + 32 <= k_end; k += 32) {
+                            // Unroll the loop 4x with multiple accumulators
+                            __m256 va1 = _mm256_loadu_ps(&A[i * K + k]);
+                            __m256 vb1 = _mm256_loadu_ps(&B_transposed[j * K + k]);
+                            vsum1 = _mm256_fmadd_ps(va1, vb1, vsum1);
+                            
+                            __m256 va2 = _mm256_loadu_ps(&A[i * K + k + 8]);
+                            __m256 vb2 = _mm256_loadu_ps(&B_transposed[j * K + k + 8]);
+                            vsum2 = _mm256_fmadd_ps(va2, vb2, vsum2);
+                            
+                            __m256 va3 = _mm256_loadu_ps(&A[i * K + k + 16]);
+                            __m256 vb3 = _mm256_loadu_ps(&B_transposed[j * K + k + 16]);
+                            vsum3 = _mm256_fmadd_ps(va3, vb3, vsum3);
+                            
+                            __m256 va4 = _mm256_loadu_ps(&A[i * K + k + 24]);
+                            __m256 vb4 = _mm256_loadu_ps(&B_transposed[j * K + k + 24]);
+                            vsum4 = _mm256_fmadd_ps(va4, vb4, vsum4);
+                        }
+                    }
+                    
+                    // Process remaining blocks of 8
+                    size_t k = (K / 32) * 32;  // Start from where the main loop ended
+                    for (; k + 8 <= K; k += 8) {
+                        __m256 va = _mm256_loadu_ps(&A[i * K + k]);
+                        __m256 vb = _mm256_loadu_ps(&B_transposed[j * K + k]);
+                        vsum1 = _mm256_fmadd_ps(va, vb, vsum1);
+                    }
+                    
+                    // Combine the partial sums
+                    vsum1 = _mm256_add_ps(vsum1, vsum2);
+                    vsum3 = _mm256_add_ps(vsum3, vsum4);
+                    vsum1 = _mm256_add_ps(vsum1, vsum3);
+                    
+                    // Horizontal sum
+                    float sum = hsum_avx(vsum1);
+                    
+                    // Process remaining elements
+                    for (; k < K; k++) {
+                        sum += A[i * K + k] * B_transposed[j * K + k];
+                    }
+                    
+                    C[i * N + j] = sum;
+                }
             }
-            
-            // Horizontal sum
-            float sum = hsum_avx(vsum);
-            
-            // Process remaining elements
-            for (; k < K; k++) {
-                sum += A[i * K + k] * B_transposed[j * K + k];
-            }
-            
-            C[i * N + j] = sum;
         }
     }
     
@@ -407,16 +461,89 @@ void tensor_op_jit_softmax_ce_with_probs(const float* logits,
 
 void tensor_matmul_batch_jit(const float* A, const float* B, float* C,
                          size_t batch, size_t M, size_t K, size_t N) {
-    size_t a_stride = M * K;
-    size_t c_stride = M * N;
-
-    #pragma omp parallel for if(batch > 2)
-    for (size_t i = 0; i < batch; ++i) {
-        tensor_matmul(
-            A + i * a_stride,
-            B,  // shared weight matrix
-            C + i * c_stride,
-            M, K, N
-        );
+    // For small matrices, transpose B once and share it across all batches
+    if (K * N <= 1024 * 1024) {  // 4MB threshold (assuming float)
+        float* B_transposed = (float*)_mm_malloc(K * N * sizeof(float), 32);
+        
+        // Transpose B once for all batches
+        for (size_t n = 0; n < N; n += 4) {
+            const size_t n_end = (n + 4 <= N) ? n + 4 : N;
+            for (size_t k = 0; k < K; k += 8) {
+                const size_t k_end = (k + 8 <= K) ? k + 8 : K;
+                
+                for (size_t j = n; j < n_end; j++) {
+                    for (size_t i = k; i < k_end; i++) {
+                        B_transposed[j * K + i] = B[i * N + j];
+                    }
+                }
+            }
+        }
+        
+        size_t a_stride = M * K;
+        size_t c_stride = M * N;
+        
+        // Process batches in parallel
+        #pragma omp parallel for if(batch > 2)
+        for (size_t i = 0; i < batch; ++i) {
+            const float* A_batch = A + i * a_stride;
+            float* C_batch = C + i * c_stride;
+            
+            // Zero out C matrix
+            memset(C_batch, 0, M * N * sizeof(float));
+            
+            // Optimized matrix multiplication using the shared transposed B
+            for (size_t m = 0; m < M; m++) {
+                for (size_t n = 0; n < N; n++) {
+                    __m256 vsum1 = _mm256_setzero_ps();
+                    __m256 vsum2 = _mm256_setzero_ps();
+                    
+                    size_t k = 0;
+                    for (; k + 16 <= K; k += 16) {
+                        __m256 va1 = _mm256_loadu_ps(&A_batch[m * K + k]);
+                        __m256 vb1 = _mm256_loadu_ps(&B_transposed[n * K + k]);
+                        vsum1 = _mm256_fmadd_ps(va1, vb1, vsum1);
+                        
+                        __m256 va2 = _mm256_loadu_ps(&A_batch[m * K + k + 8]);
+                        __m256 vb2 = _mm256_loadu_ps(&B_transposed[n * K + k + 8]);
+                        vsum2 = _mm256_fmadd_ps(va2, vb2, vsum2);
+                    }
+                    
+                    // Process remaining blocks of 8
+                    for (; k + 8 <= K; k += 8) {
+                        __m256 va = _mm256_loadu_ps(&A_batch[m * K + k]);
+                        __m256 vb = _mm256_loadu_ps(&B_transposed[n * K + k]);
+                        vsum1 = _mm256_fmadd_ps(va, vb, vsum1);
+                    }
+                    
+                    // Combine partial sums
+                    vsum1 = _mm256_add_ps(vsum1, vsum2);
+                    float sum = hsum_avx(vsum1);
+                    
+                    // Process remaining elements
+                    for (; k < K; k++) {
+                        sum += A_batch[m * K + k] * B_transposed[n * K + k];
+                    }
+                    
+                    C_batch[m * N + n] = sum;
+                }
+            }
+        }
+        
+        _mm_free(B_transposed);
+    } else {
+        // For large matrices, use the original approach to avoid excessive memory usage
+        size_t a_stride = M * K;
+        size_t c_stride = M * N;
+        
+        #pragma omp parallel for if(batch > 2)
+        for (size_t i = 0; i < batch; ++i) {
+            tensor_matmul(
+                A + i * a_stride,
+                B,  // shared weight matrix
+                C + i * c_stride,
+                M, K, N
+            );
+        }
     }
 }
+

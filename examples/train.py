@@ -94,7 +94,7 @@ def train():
         correct = 0.0
         total = 0.0
         random.shuffle(train_data)
-        progress = tqdm(range(0, len(train_data), batch_size), desc=f"Epoch {epoch+1}/5")
+        progress = tqdm(range(0, len(train_data), batch_size), desc=f"Epoch {epoch+1}/10")
 
         for i in progress:
             batch = train_data[i:i+batch_size]

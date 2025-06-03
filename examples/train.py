@@ -88,7 +88,7 @@ def train():
 
     train_data = load_bin_dataset('mnist_train.bin', num_samples, input_size + 10)
 
-    for epoch in range(5): # test
+    for epoch in range(5):
         total_loss = 0.0
         correct = 0.0
         total = 0.0

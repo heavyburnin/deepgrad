@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Digit Recognizer</title>
+  <style>
+    body {
+      background-color: #f3f4f6;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    h1 {
+      color: #111827;
+      margin-bottom: 1rem;
+    }
+    canvas {
+      border: 2px solid #9ca3af;
+      background: white;
+      cursor: crosshair;
+    }
+    .buttons {
+      margin-top: 1rem;
+      display: flex;
+      gap: 1rem;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 0.375rem;
+      background-color: #2563eb;
+      color: white;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #1d4ed8;
+    }
+    #prediction {
+      margin-top: 1rem;
+      font-size: 1.25rem;
+      color: #111827;
+    }
+  </style>
+</head>
+<body>
+  <h1>Draw a Digit</h1>
+  <canvas id="canvas" width="280" height="280"></canvas>
+  <div class="buttons">
+    <button onclick="clearCanvas()">Clear</button>
+    <button onclick="predict()">Predict</button>
+  </div>
+  <div id="prediction"></div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let drawing = false;
+
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    canvas.addEventListener('mousedown', () => drawing = true);
+    canvas.addEventListener('mouseup', () => drawing = false);
+    canvas.addEventListener('mousemove', draw);
+
+    function draw(e) {
+      if (!drawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      ctx.fillStyle = "black";
+      ctx.beginPath();
+      ctx.arc(x, y, 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      document.getElementById('prediction').innerText = '';
+    }
+
+    function getImageData() {
+      const imageData = ctx.getImageData(0, 0, 280, 280);
+      const pixels = new Array(784).fill(0);
+      for (let y = 0; y < 28; y++) {
+        for (let x = 0; x < 28; x++) {
+          let sum = 0;
+          for (let dy = 0; dy < 10; dy++) {
+            for (let dx = 0; dx < 10; dx++) {
+              const i = ((y * 10 + dy) * 280 + (x * 10 + dx)) * 4;
+              sum += imageData.data[i]; // red channel is enough
+            }
+          }
+          const avg = 255 - (sum / 100); // invert, normalize
+          pixels[y * 28 + x] = avg / 255;
+        }
+      }
+      return pixels;
+    }
+
+    async function predict() {
+      const pixels = getImageData();
+      const response = await fetch('/predict', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ pixels })
+      });
+      const result = await response.json();
+      document.getElementById('prediction').innerText = result.prediction !== undefined ? `Prediction: ${result.prediction}` : 'Error';
+    }
+  </script>
+</body>
+</html>
+

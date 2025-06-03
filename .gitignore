@@ -4,3 +4,5 @@ examples/mnist_test.csv
 examples/mnist_test.bin
 examples/venv
 examples/__pycache__
+build/
+model.pkl

@@ -17,7 +17,8 @@ def convert_csv_to_bin(csv_path, bin_path):
             label_idx = int(values[0])
             one_hot = [0.0] * 10
             one_hot[label_idx] = 1.0
-            image = values[1:]  # 784 values
+            #image = values[1:]  # 784 values
+            image = [px / 255.0 for px in values[1:]]
             sample = image + one_hot  # total: 784 + 10
             f_bin.write(struct.pack(f'{len(sample)}f', *sample))
 
@@ -84,11 +85,11 @@ def train():
     batch_size = 64
     #input_size, hidden1, hidden2, output_size
     model = MLP(input_size, hidden1, hidden2, output_size)
-    optimizer = SGD(model.parameters(), lr=0.001)
+    optimizer = SGD(model.parameters(), lr=0.01)
 
     train_data = load_bin_dataset('mnist_train.bin', num_samples, input_size + 10)
 
-    for epoch in range(5):
+    for epoch in range(10):
         total_loss = 0.0
         correct = 0.0
         total = 0.0

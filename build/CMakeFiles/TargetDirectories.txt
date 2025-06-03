@@ -1,3 +1,0 @@
-/home/andy/deepgrad/simd_tensor_backend/build/CMakeFiles/simd_tensor_backend.dir
-/home/andy/deepgrad/simd_tensor_backend/build/CMakeFiles/edit_cache.dir
-/home/andy/deepgrad/simd_tensor_backend/build/CMakeFiles/rebuild_cache.dir

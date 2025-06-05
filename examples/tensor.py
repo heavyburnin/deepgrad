@@ -1,4 +1,3 @@
-# Enhanced Tensor class with batching support (no NumPy)
 import ctypes
 import os
 import array
@@ -10,7 +9,13 @@ lib = ctypes.cdll.LoadLibrary(os.path.abspath("../build/libsimd_tensor_backend.s
 c_float_p = ctypes.POINTER(ctypes.c_float)
 c_size_t = ctypes.c_size_t
 
-# Define C function signatures once at module level
+lib.tensor_ops_init.restype = ctypes.c_int
+lib.tensor_ops_init.argtypes = []
+if lib.tensor_ops_init() != 0:
+    raise RuntimeError("Failed to initialize SIMD tensor backend (AVX2 may be missing)")
+
+lib.sanitize_gradients.argtypes = [c_float_p, c_size_t]
+lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, ctypes.c_float]
 lib.tensor_add.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_sub.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_mul.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
@@ -18,8 +23,21 @@ lib.tensor_div.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_relu.argtypes = [c_float_p, c_float_p, c_size_t]
 lib.tensor_matmul_batch_jit.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t]
 lib.tensor_op_jit_softmax_ce_with_probs.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_op_jit_1in.argtypes = [ctypes.c_void_p, c_float_p, c_float_p, c_size_t, c_size_t]
 lib.tensor_exp.argtypes = [c_float_p, c_float_p, c_size_t]
+lib.tensor_sum.restype = ctypes.c_float
+lib.tensor_sum.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_mean.restype = ctypes.c_float
+lib.tensor_mean.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_broadcast_row.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
+lib.tensor_broadcast_col.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
+lib.tensor_transpose_jit.argtypes = [
+    ctypes.POINTER(ctypes.c_float),
+    ctypes.POINTER(ctypes.c_float),
+    ctypes.c_size_t,  # ndim
+    ctypes.c_size_t,  # B
+    ctypes.c_size_t,  # M
+    ctypes.c_size_t   # N
+]
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -54,6 +72,19 @@ class Tensor:
             for i in range(len(self.grad)):
                 self.grad[i] = 0.0
 
+    def sanitize_gradients(self):
+        if self.grad is not None:
+            # Convert list to array.array first if it's a list
+            if isinstance(self.grad, list):
+                self.grad = array.array('f', self.grad)
+                
+            # Now create the buffer from the array
+            lib.sanitize_gradients(
+                (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
+                len(self.grad)
+            )
+        return self
+
     def backward(self):
         if self.grad is None:
             self.grad = array.array('f', [0.0] * len(self.data))
@@ -78,6 +109,9 @@ class Tensor:
         # Backward pass
         for t in reversed(topo):
             t._backward()
+            # Sanitize gradients after each backward step
+            if t.grad is not None:
+                t.sanitize_gradients()
 
     @staticmethod
     @lru_cache(maxsize=128)
@@ -101,26 +135,38 @@ class Tensor:
 
     @staticmethod
     def _broadcast_data(data, from_shape, to_shape):
-        """Broadcast data from one shape to another."""
+        """Broadcast data from one shape to another using C acceleration when possible."""
         if from_shape == to_shape:
             return data[:]
-            
-        # Handle common broadcasting patterns efficiently
+
+        # Handle 2D broadcasting patterns efficiently
         if len(from_shape) == 2 and len(to_shape) == 2:
-            if from_shape[0] == 1 and from_shape[1] == to_shape[1]:  # [1, N] -> [M, N]
-                return data * to_shape[0]
-            elif from_shape[1] == 1 and from_shape[0] == to_shape[0]:  # [M, 1] -> [M, N]
-                result = array.array('f', [0.0] * (to_shape[0] * to_shape[1]))
-                for i in range(to_shape[0]):
-                    val = data[i]
-                    for j in range(to_shape[1]):
-                        result[i * to_shape[1] + j] = val
+            # Case: [1, N] -> [B, N]  (row repeat)
+            if from_shape[0] == 1 and from_shape[1] == to_shape[1]:
+                B, N = to_shape
+                result = array.array('f', [0.0] * (B * N))
+                lib.tensor_broadcast_row(
+                    (ctypes.c_float * len(data)).from_buffer(data),
+                    (ctypes.c_float * len(result)).from_buffer(result),
+                    B, N
+                )
                 return result
-        
+
+            # Case: [B, 1] -> [B, N]  (column repeat)
+            elif from_shape[1] == 1 and from_shape[0] == to_shape[0]:  # [B, 1] → [B, N]
+                B, N = to_shape
+                result = array.array('f', [0.0] * (B * N))
+                lib.tensor_broadcast_col(
+                    (ctypes.c_float * len(data)).from_buffer(data),
+                    (ctypes.c_float * len(result)).from_buffer(result),
+                    B, N
+                )
+                return result
+
         # Scalar to any shape
         if from_shape == (1,):
             return data * math.prod(to_shape)
-            
+
         raise NotImplementedError(f"Unsupported broadcast from {from_shape} to {to_shape}")
 
     def _apply_op(self, other, op_name, grad_fn):
@@ -150,6 +196,11 @@ class Tensor:
 
         if out.requires_grad:
             def _backward():
+                if self.requires_grad and isinstance(self.grad, list):
+                    self.grad = array.array('f', self.grad)
+                if other.requires_grad and isinstance(other.grad, list):
+                    other.grad = array.array('f', other.grad)
+                 
                 if self.requires_grad:
                     # Optimize gradient accumulation
                     self_grad = self.grad
@@ -201,6 +252,9 @@ class Tensor:
         if out.requires_grad:
             def _backward():
                 if self.requires_grad:
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
+
                     for i in range(len(self.data)):
                         self.grad[i] += out.grad[i]
 
@@ -215,81 +269,101 @@ class Tensor:
         return Tensor(self.grad[:], requires_grad=False, shape=self.shape)
 
     def transpose(self):
+        """Transpose tensor dimensions.
+        - For 1D: Convert to column vector (N,) -> (N, 1)
+        - For 2D: Swap dimensions (M, N) -> (N, M)
+        - For 3D: Transpose last two dimensions (B, M, N) -> (B, N, M)
+        """
         if len(self.shape) == 1:
-            M, N = 1, self.shape[0]
+            # 1D case: vector to column vector
+            N = self.shape[0]
             out_shape = (N, 1)
+            transposed_data = array.array('f', [0.0] * N)
+            
+            # Simple copy for 1D case
+            for i in range(N):
+                transposed_data[i] = self.data[i]
+                
         elif len(self.shape) == 2:
+            # 2D case: matrix transpose
             M, N = self.shape
             out_shape = (N, M)
+            transposed_data = array.array('f', [0.0] * (M * N))
+            
+            # Call C implementation for 2D transpose
+            lib.tensor_transpose_jit(
+                (ctypes.c_float * len(self.data)).from_buffer(self.data),
+                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
+                ctypes.c_size_t(2),  # ndim
+                ctypes.c_size_t(1),  # B (unused for 2D)
+                ctypes.c_size_t(M),
+                ctypes.c_size_t(N)
+            )
+            
+        elif len(self.shape) == 3:
+            # 3D case: batch transpose
+            B, M, N = self.shape
+            out_shape = (B, N, M)
+            transposed_data = array.array('f', [0.0] * (B * M * N))
+            
+            # Call C implementation for 3D batch transpose
+            lib.tensor_transpose_jit(
+                (ctypes.c_float * len(self.data)).from_buffer(self.data),
+                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
+                ctypes.c_size_t(3),  # ndim
+                ctypes.c_size_t(B),
+                ctypes.c_size_t(M),
+                ctypes.c_size_t(N)
+            )
         else:
-            raise NotImplementedError("Only 1D or 2D transpose is supported")
-
-        transposed_data = array.array('f', [0.0] * (M * N))
-        
-        # Optimize transpose with block processing for better cache locality
-        block_size = min(32, M, N)  # Choose appropriate block size
-        for i_block in range(0, M, block_size):
-            i_end = min(i_block + block_size, M)
-            for j_block in range(0, N, block_size):
-                j_end = min(j_block + block_size, N)
-                
-                for i in range(i_block, i_end):
-                    for j in range(j_block, j_end):
-                        transposed_data[j * M + i] = self.data[i * N + j]
+            raise NotImplementedError(f"Transpose not implemented for {len(self.shape)}D tensors")
 
         out = Tensor(transposed_data, requires_grad=self.requires_grad, shape=out_shape)
 
         if out.requires_grad:
             def _backward():
                 if self.requires_grad and out.grad:
-                    for i in range(M):
-                        for j in range(N):
-                            self.grad[i * N + j] += out.grad[j * M + i]
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
+                    if len(self.shape) == 1:
+                        # 1D case: simple copy
+                        for i in range(len(self.grad)):
+                            self.grad[i] += out.grad[i]
+                            
+                    elif len(self.shape) == 2:
+                        # 2D case: use the same function for gradient (transpose is its own inverse)
+                        M, N = self.shape
+                        lib.tensor_transpose_jit(
+                            (ctypes.c_float * len(out.grad))(*out.grad),
+                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
+                            ctypes.c_size_t(2),  # ndim
+                            ctypes.c_size_t(1),  # B (unused for 2D)
+                            ctypes.c_size_t(N),  # Note: dimensions swapped for gradient
+                            ctypes.c_size_t(M)
+                        )
+                        
+                    elif len(self.shape) == 3:
+                        # 3D case: use the same function for gradient
+                        B, M, N = self.shape
+                        lib.tensor_transpose_jit(
+                            (ctypes.c_float * len(out.grad))(*out.grad),
+                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
+                            ctypes.c_size_t(3),  # ndim
+                            ctypes.c_size_t(B),
+                            ctypes.c_size_t(N),  # Note: dimensions swapped for gradient
+                            ctypes.c_size_t(M)
+                        )
 
             out._backward = _backward
             out._prev = [self]
 
-        return out
-    
-    def transpose_batch(self):
-        """Transpose last two dimensions for 3D tensors."""
-        if len(self.shape) != 3:
-            raise ValueError("transpose_batch only works on 3D tensors")
-            
-        B, M, N = self.shape
-        out_shape = (B, N, M)
-        
-        transposed_data = array.array('f', [0.0] * (B * M * N))
-        
-        for b in range(B):
-            b_offset = b * M * N
-            b_out_offset = b * N * M
-            for i in range(M):
-                for j in range(N):
-                    transposed_data[b_out_offset + j * M + i] = self.data[b_offset + i * N + j]
-                    
-        out = Tensor(transposed_data, requires_grad=self.requires_grad, shape=out_shape)
-        
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad and out.grad:
-                    for b in range(B):
-                        b_offset = b * M * N
-                        b_out_offset = b * N * M
-                        for i in range(M):
-                            for j in range(N):
-                                self.grad[b_offset + i * N + j] += out.grad[b_out_offset + j * M + i]
-                                
-            out._backward = _backward
-            out._prev = [self]
-            
         return out
 
     def relu(self):
         out_data = array.array('f', [0.0] * len(self.data))
 
         lib.tensor_relu(
-            (ctypes.c_float * len(self.data))(*self.data),
+            (ctypes.c_float * len(self.data)).from_buffer(self.data),
             (ctypes.c_float * len(out_data)).from_buffer(out_data),
             len(self.data)
         )
@@ -299,6 +373,8 @@ class Tensor:
         if out.requires_grad:
             def _backward():
                 if self.requires_grad:
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
                     data = self.data
                     out_grad = out.grad
                     self_grad = self.grad
@@ -323,8 +399,8 @@ class Tensor:
             out_data = array.array('f', [0.0] * (B * N))
 
             lib.tensor_matmul_batch_jit(
-                (ctypes.c_float * len(self.data))(*self.data),
-                (ctypes.c_float * len(other.data))(*other.data),
+                (ctypes.c_float * len(self.data)).from_buffer(self.data),
+                (ctypes.c_float * len(other.data)).from_buffer(other.data),
                 (ctypes.c_float * len(out_data)).from_buffer(out_data),
                 B, 1, M, N
             )
@@ -334,12 +410,17 @@ class Tensor:
             if out.requires_grad:
                 def _backward():
                     if self.requires_grad:
+                        if isinstance(self.grad, list):
+                            self.grad = array.array('f', self.grad)
+
                         b_T = other.transpose()
                         dA = out.grad_tensor().matmul(b_T)
                         for i in range(len(self.grad)):
                             self.grad[i] += dA.data[i]
 
                     if other.requires_grad:
+                        if isinstance(other.grad, list):
+                            other.grad = array.array('f', other.grad)
                         a_T = self.transpose()
                         dB = a_T.matmul(out.grad_tensor())
                         for i in range(len(other.grad)):
@@ -359,8 +440,8 @@ class Tensor:
             out_data = array.array('f', [0.0] * (B1 * M * N))
 
             lib.tensor_matmul_batch_jit(
-                (ctypes.c_float * len(self.data))(*self.data),
-                (ctypes.c_float * len(other.data))(*other.data),
+                (ctypes.c_float * len(self.data)).from_buffer(self.data),
+                (ctypes.c_float * len(other.data)).from_buffer(other.data),
                 (ctypes.c_float * len(out_data)).from_buffer(out_data),
                 B1, M, K1, N
             )
@@ -370,13 +451,17 @@ class Tensor:
             if out.requires_grad:
                 def _backward():
                     if self.requires_grad:
-                        b_T = other.transpose_batch()
+                        if isinstance(self.grad, list):
+                            self.grad = array.array('f', self.grad)
+                        b_T = other.transpose()
                         dA = out.grad_tensor().matmul(b_T)
                         for i in range(len(self.grad)):
                             self.grad[i] += dA.data[i]
 
                     if other.requires_grad:
-                        a_T = self.transpose_batch()
+                        if isinstance(other.grad, list):
+                            other.grad = array.array('f', other.grad)
+                        a_T = self.transpose()
                         dB = a_T.matmul(out.grad_tensor())
                         for i in range(len(other.grad)):
                             other.grad[i] += dB.data[i]
@@ -396,8 +481,8 @@ class Tensor:
         probs_data = array.array('f', [0.0] * (B * C))
 
         lib.tensor_op_jit_softmax_ce_with_probs(
-            (ctypes.c_float * len(self.data))(*self.data),
-            (ctypes.c_float * len(target.data))(*target.data),
+            (ctypes.c_float * len(self.data)).from_buffer(self.data),
+            (ctypes.c_float * len(target.data)).from_buffer(target.data),
             (ctypes.c_float * B).from_buffer(loss_data),
             (ctypes.c_float * (B * C)).from_buffer(probs_data),
             B, C
@@ -409,6 +494,8 @@ class Tensor:
         if loss.requires_grad:
             def _backward():
                 if self.requires_grad:
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
                     scale = loss.grad[0] if len(loss.grad) == 1 else None
                     for i in range(B * C):
                         grad_scale = scale if scale is not None else loss.grad[i // C]
@@ -420,64 +507,46 @@ class Tensor:
         return loss.mean()
 
     def mean(self):
-        n = len(self.data)
-        total = sum(self.data)
-        result = total / n
-        out = Tensor([result], requires_grad=self.requires_grad)
+        # Call C implementation for mean calculation
+        result = lib.tensor_mean((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
 
+        # Create output tensor with the scalar result
+        out = Tensor([result], requires_grad=self.requires_grad)
+        
         if out.requires_grad:
             def _backward():
                 if self.requires_grad:
-                    grad_val = out.grad[0] / n
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
+                    grad_val = out.grad[0] / len(self.data)
                     for i in range(len(self.grad)):
                         self.grad[i] += grad_val
-
+            
             out._backward = _backward
             out._prev = [self]
-
+        
         return out
 
     def sum(self):
-        total = sum(self.data)
-        out = Tensor([total], requires_grad=self.requires_grad)
+        # Call C implementation for sum calculation
+        result = lib.tensor_sum((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
 
+        # Create output tensor with the scalar result
+        out = Tensor([result], requires_grad=self.requires_grad)
+        
         if out.requires_grad:
             def _backward():
                 if self.requires_grad:
+                    if isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
                     grad_val = out.grad[0]
                     for i in range(len(self.grad)):
                         self.grad[i] += grad_val
-
+            
             out._backward = _backward
             out._prev = [self]
-
+        
         return out
 
-    def exp(self):
-        out_data = array.array('f', [0.0] * len(self.data))
-        batch = 1
-        stride = len(self.data)
-
-        if len(self.shape) == 2:
-            batch, stride = self.shape
-
-        lib.tensor_op_jit_1in(lib.tensor_exp,
-                            (ctypes.c_float * len(self.data))(*self.data),
-                            (ctypes.c_float * len(out_data)).from_buffer(out_data),
-                            batch, stride)
-
-        out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape)
-
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad:
-                    for i in range(len(self.grad)):
-                        self.grad[i] += out.grad[i] * out.data[i]
-
-            out._backward = _backward
-            out._prev = [self]
-
-        return out
-    
     def __repr__(self):
         return f"Tensor(shape={self.shape}, data={list(self.data)}, grad={list(self.grad) if self.grad else None})"

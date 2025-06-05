@@ -2,50 +2,33 @@ import random
 import math
 from tensor import Tensor
 
-class Linear:
-    def __init__(self, in_dim, out_dim):
-        # Xavier Glorot Uniform initialization
-        limit = math.sqrt(6 / (in_dim + out_dim))
-        # Create weights in one operation
-        self.weight = Tensor(
-            [random.uniform(-limit, limit) for _ in range(in_dim * out_dim)], 
-            requires_grad=True, 
-            shape=(in_dim, out_dim)
-        )
-        # Initialize bias to zeros
-        self.bias = Tensor([0.0] * out_dim, requires_grad=True, shape=(1, out_dim))
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-
-    def __call__(self, x):
-        # Combine operations to reduce intermediate tensors
-        return x.matmul(self.weight) + self.bias
-
-    def parameters(self):
-        return [self.weight, self.bias]
-
-class ReLU:
-    def __call__(self, x):
-        return x.relu()
-
 class MLP:
     def __init__(self, input_size, hidden1, hidden2, output_size):
-        self.layers = [
-            Linear(input_size, hidden1),
-            ReLU(),
-            Linear(hidden1, hidden2),
-            ReLU(),
-            Linear(hidden2, output_size)
-        ]
+        # Xavier/Glorot initialization for better gradient flow
+        xavier_1 = math.sqrt(6.0 / (input_size + hidden1))
+        xavier_2 = math.sqrt(6.0 / (hidden1 + hidden2))
+        xavier_3 = math.sqrt(6.0 / (hidden2 + output_size))
+        
+        # Initialize with proper scaling
+        self.f1 = Tensor([random.uniform(-xavier_1, xavier_1) for _ in range(input_size * hidden1)], 
+                         requires_grad=True, shape=(input_size, hidden1))
+        self.b1 = Tensor([0.0] * hidden1, requires_grad=True, shape=(1, hidden1))
+        
+        self.w2 = Tensor([random.uniform(-xavier_2, xavier_2) for _ in range(hidden1 * hidden2)], 
+                         requires_grad=True, shape=(hidden1, hidden2))
+        self.b2 = Tensor([0.0] * hidden2, requires_grad=True, shape=(1, hidden2))
+        
+        self.w3 = Tensor([random.uniform(-xavier_3, xavier_3) for _ in range(hidden2 * output_size)], 
+                         requires_grad=True, shape=(hidden2, output_size))
+        self.b3 = Tensor([0.0] * output_size, requires_grad=True, shape=(1, output_size))
 
     def __call__(self, x):
-        for layer in self.layers:
-            x = layer(x)
+        # Forward pass through the network
+        x = (x.matmul(self.f1) + self.b1).relu()
+        x = (x.matmul(self.w2) + self.b2).relu()
+        x = x.matmul(self.w3) + self.b3
         return x
 
     def parameters(self):
-        params = []
-        for layer in self.layers:
-            if hasattr(layer, 'parameters'):
-                params.extend(layer.parameters())
-        return params
+        # Return all trainable parameters
+        return [self.f1, self.b1, self.w2, self.b2, self.w3, self.b3]

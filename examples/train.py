@@ -6,7 +6,10 @@ from tensor import Tensor
 from model import MLP
 from optimizer import SGD
 from tqdm import tqdm
-
+from tqdm.contrib.concurrent import thread_map
+##remove below
+import cProfile
+import pstats
 
 # CSV to .bin conversion (run once)
 def convert_csv_to_bin(csv_path, bin_path):
@@ -82,8 +85,8 @@ def train():
     hidden1 = 128
     hidden2 = 64
     num_samples = 60000
-    batch_size = 64
-    #input_size, hidden1, hidden2, output_size
+    batch_size = 32
+
     model = MLP(input_size, hidden1, hidden2, output_size)
     optimizer = SGD(model.parameters(), lr=0.01)
 
@@ -94,7 +97,8 @@ def train():
         correct = 0.0
         total = 0.0
         random.shuffle(train_data)
-        progress = tqdm(range(0, len(train_data), batch_size), desc=f"Epoch {epoch+1}/10")
+        #progress = tqdm(range(0, len(train_data), batch_size), desc=f"Epoch {epoch+1}/10")
+        progress = tqdm(range(0, len(train_data), batch_size), desc=f"Epoch {epoch+1}/10", dynamic_ncols=False)
 
         for i in progress:
             batch = train_data[i:i+batch_size]
@@ -119,11 +123,12 @@ def train():
             total_loss += loss.data[0]
             correct += accuracy(pred, y) * len(batch)
             total += len(batch)
-
-            progress.set_postfix({
-                "loss": total_loss / (total or 1),
-                "acc": f"{(correct / total) * 100:.2f}%"
-            })
+            
+            if i % 25 == 0:
+                progress.set_postfix({
+                    "loss": total_loss / (total or 1),
+                    "acc": f"{(correct / total) * 100:.2f}%"
+                })
 
         evaluate(model)
 
@@ -132,11 +137,23 @@ def train():
     print("Model saved to model.pkl")
 
 
-if __name__ == '__main__':
-    if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
-        convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
-        convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
-    else:
-        print("Binary file already exists. Skipping conversion.")
+#if __name__ == '__main__':
+#    if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
+#        convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
+#        convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
+#    else:
+#        print("Binary file already exists. Skipping conversion.")
 
-    train()
+#    train()
+
+if __name__ == '__main__':
+    with cProfile.Profile() as pr:
+        if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
+            convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
+            convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
+        else:
+            print("Binary file already exists. Skipping conversion.")
+        train()
+
+    stats = pstats.Stats(pr)
+    stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(20)

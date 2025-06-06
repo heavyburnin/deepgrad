@@ -363,82 +363,26 @@ void tensor_add(const float* a, const float* b, float* out, size_t n) {
         return;
     }
     
-    #pragma omp parallel for if(n > 10000)
-    for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-        size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
+    size_t i = 0;
+    // Process 32 elements at a time (4 AVX2 registers)
+    for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
+        // Prefetch next cache lines
+        _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
+        _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
         
-        if (chunk_size >= 4*VEC_SIZE) {
-            // Prefetch next cache lines
-            _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-            _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-            
-            _mm256_storeu_ps(out + i,             _mm256_add_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-            _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_add_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-        } else {
-            for (size_t j = i; j < i + chunk_size; j++) {
-                if (j + VEC_SIZE <= n) {
-                    __m256 va = _mm256_loadu_ps(a + j);
-                    __m256 vb = _mm256_loadu_ps(b + j);
-                    __m256 vout = _mm256_add_ps(va, vb);
-                    _mm256_storeu_ps(out + j, vout);
-                    j += VEC_SIZE - 1; // -1 because loop will increment
-                } else {
-                    out[j] = a[j] + b[j];
-                }
-            }
-        }
+        _mm256_storeu_ps(out + i,             _mm256_add_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
+        _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_add_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
     }
-}
-
-// Gradient function for tensor_add
-void tensor_add_grad(const float* grad_output, float* grad_a, float* grad_b, size_t n) {
-    if (!grad_output || (!grad_a && !grad_b)) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_add_grad\n");
-        return;
+    // Process 8 elements at a time
+    for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vout = _mm256_add_ps(va, vb);
+        _mm256_storeu_ps(out + i, vout);
     }
-    
-    // For addition, gradients flow directly to both inputs
-    if (grad_a) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_a + i,             _mm256_loadu_ps(grad_output + i));
-                _mm256_storeu_ps(grad_a + i + VEC_SIZE,   _mm256_loadu_ps(grad_output + i + VEC_SIZE));
-                _mm256_storeu_ps(grad_a + i + 2*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 2*VEC_SIZE));
-                _mm256_storeu_ps(grad_a + i + 3*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 3*VEC_SIZE));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_a[j] = grad_output[j];
-                }
-            }
-        }
-    }
-    
-    if (grad_b) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_b + i,             _mm256_loadu_ps(grad_output + i));
-                _mm256_storeu_ps(grad_b + i + VEC_SIZE,   _mm256_loadu_ps(grad_output + i + VEC_SIZE));
-                _mm256_storeu_ps(grad_b + i + 2*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 2*VEC_SIZE));
-                _mm256_storeu_ps(grad_b + i + 3*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 3*VEC_SIZE));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_b[j] = grad_output[j];
-                }
-            }
-        }
-    }
+    for (; i < n; i++) out[i] = a[i] + b[i];
 }
 
 void tensor_sub(const float* a, const float* b, float* out, size_t n) {
@@ -447,84 +391,25 @@ void tensor_sub(const float* a, const float* b, float* out, size_t n) {
         return;
     }
     
-    #pragma omp parallel for if(n > 10000)
-    for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-        size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
+    size_t i = 0;
+    // Process 32 elements at a time
+    for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
+        // Prefetch next cache lines
+        _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
+        _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
         
-        if (chunk_size >= 4*VEC_SIZE) {
-            // Prefetch next cache lines
-            _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-            _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-            
-            _mm256_storeu_ps(out + i,             _mm256_sub_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-            _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_sub_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-        } else {
-            for (size_t j = i; j < i + chunk_size; j++) {
-                if (j + VEC_SIZE <= n) {
-                    __m256 va = _mm256_loadu_ps(a + j);
-                    __m256 vb = _mm256_loadu_ps(b + j);
-                    __m256 vout = _mm256_sub_ps(va, vb);
-                    _mm256_storeu_ps(out + j, vout);
-                    j += VEC_SIZE - 1; // -1 because loop will increment
-                } else {
-                    out[j] = a[j] - b[j];
-                }
-            }
-        }
+        _mm256_storeu_ps(out + i,             _mm256_sub_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
+        _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_sub_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
     }
-}
-
-// Gradient function for tensor_sub
-void tensor_sub_grad(const float* grad_output, float* grad_a, float* grad_b, size_t n) {
-    if (!grad_output || (!grad_a && !grad_b)) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_sub_grad\n");
-        return;
+    for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vout = _mm256_sub_ps(va, vb);
+        _mm256_storeu_ps(out + i, vout);
     }
-    
-    // For subtraction, gradients flow directly to first input and negatively to second input
-    if (grad_a) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_a + i,             _mm256_loadu_ps(grad_output + i));
-                _mm256_storeu_ps(grad_a + i + VEC_SIZE,   _mm256_loadu_ps(grad_output + i + VEC_SIZE));
-                _mm256_storeu_ps(grad_a + i + 2*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 2*VEC_SIZE));
-                _mm256_storeu_ps(grad_a + i + 3*VEC_SIZE, _mm256_loadu_ps(grad_output + i + 3*VEC_SIZE));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_a[j] = grad_output[j];
-                }
-            }
-        }
-    }
-    
-    if (grad_b) {
-        __m256 neg_one = _mm256_set1_ps(-1.0f);
-        
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_b + i,             _mm256_mul_ps(_mm256_loadu_ps(grad_output + i), neg_one));
-                _mm256_storeu_ps(grad_b + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + VEC_SIZE), neg_one));
-                _mm256_storeu_ps(grad_b + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 2*VEC_SIZE), neg_one));
-                _mm256_storeu_ps(grad_b + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 3*VEC_SIZE), neg_one));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_b[j] = -grad_output[j];
-                }
-            }
-        }
-    }
+    for (; i < n; i++) out[i] = a[i] - b[i];
 }
 
 void tensor_mul(const float* a, const float* b, float* out, size_t n) {
@@ -533,85 +418,25 @@ void tensor_mul(const float* a, const float* b, float* out, size_t n) {
         return;
     }
     
-    #pragma omp parallel for if(n > 10000)
-    for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-        size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
+    size_t i = 0;
+    // Process 32 elements at a time
+    for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
+        // Prefetch next cache lines
+        _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
+        _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
         
-        if (chunk_size >= 4*VEC_SIZE) {
-            // Prefetch next cache lines
-            _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-            _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-            
-            _mm256_storeu_ps(out + i,             _mm256_mul_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-            _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-        } else {
-            for (size_t j = i; j < i + chunk_size; j++) {
-                if (j + VEC_SIZE <= n) {
-                    __m256 va = _mm256_loadu_ps(a + j);
-                    __m256 vb = _mm256_loadu_ps(b + j);
-                    __m256 vout = _mm256_mul_ps(va, vb);
-                    _mm256_storeu_ps(out + j, vout);
-                    j += VEC_SIZE - 1; // -1 because loop will increment
-                } else {
-                    out[j] = a[j] * b[j];
-                }
-            }
-        }
+        _mm256_storeu_ps(out + i,             _mm256_mul_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
+        _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
     }
-}
-
-// Gradient function for tensor_mul
-void tensor_mul_grad(const float* grad_output, const float* a, const float* b, 
-                     float* grad_a, float* grad_b, size_t n) {
-    if (!grad_output || !a || !b || (!grad_a && !grad_b)) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_mul_grad\n");
-        return;
+    for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vout = _mm256_mul_ps(va, vb);
+        _mm256_storeu_ps(out + i, vout);
     }
-    
-    // For multiplication, grad_a = grad_output * b, grad_b = grad_output * a
-    if (grad_a) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_a + i,             _mm256_mul_ps(_mm256_loadu_ps(grad_output + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(grad_a + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(grad_a + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(grad_a + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_a[j] = grad_output[j] * b[j];
-                }
-            }
-        }
-    }
-    
-    if (grad_b) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_b + i,             _mm256_mul_ps(_mm256_loadu_ps(grad_output + i),             _mm256_loadu_ps(a + i)));
-                _mm256_storeu_ps(grad_b + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + VEC_SIZE),   _mm256_loadu_ps(a + i + VEC_SIZE)));
-                _mm256_storeu_ps(grad_b + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 2*VEC_SIZE), _mm256_loadu_ps(a + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(grad_b + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(grad_output + i + 3*VEC_SIZE), _mm256_loadu_ps(a + i + 3*VEC_SIZE)));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_b[j] = grad_output[j] * a[j];
-                }
-            }
-        }
-    }
+    for (; i < n; i++) out[i] = a[i] * b[i];
 }
 
 void tensor_div(const float* a, const float* b, float* out, size_t n) {
@@ -620,96 +445,25 @@ void tensor_div(const float* a, const float* b, float* out, size_t n) {
         return;
     }
     
-    #pragma omp parallel for if(n > 10000)
-    for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-        size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
+    size_t i = 0;
+    // Process 32 elements at a time
+    for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
+        // Prefetch next cache lines
+        _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
+        _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
         
-        if (chunk_size >= 4*VEC_SIZE) {
-            // Prefetch next cache lines
-            _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-            _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-            
-            _mm256_storeu_ps(out + i,             _mm256_div_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-            _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_div_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-            _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-        } else {
-            for (size_t j = i; j < i + chunk_size; j++) {
-                if (j + VEC_SIZE <= n) {
-                    __m256 va = _mm256_loadu_ps(a + j);
-                    __m256 vb = _mm256_loadu_ps(b + j);
-                    __m256 vout = _mm256_div_ps(va, vb);
-                    _mm256_storeu_ps(out + j, vout);
-                    j += VEC_SIZE - 1; // -1 because loop will increment
-                } else {
-                    out[j] = a[j] / b[j];
-                }
-            }
-        }
+        _mm256_storeu_ps(out + i,             _mm256_div_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
+        _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_div_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
+        _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
     }
-}
-
-// Gradient function for tensor_div
-void tensor_div_grad(const float* grad_output, const float* a, const float* b, 
-                     float* grad_a, float* grad_b, size_t n) {
-    if (!grad_output || !a || !b || (!grad_a && !grad_b)) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_div_grad\n");
-        return;
+    for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vout = _mm256_div_ps(va, vb);
+        _mm256_storeu_ps(out + i, vout);
     }
-    
-    // For division a/b:
-    // grad_a = grad_output / b
-    // grad_b = -grad_output * a / (b * b)
-    
-    if (grad_a) {
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(grad_a + i,             _mm256_div_ps(_mm256_loadu_ps(grad_output + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(grad_a + i + VEC_SIZE,   _mm256_div_ps(_mm256_loadu_ps(grad_output + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(grad_a + i + 2*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(grad_output + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(grad_a + i + 3*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(grad_output + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_a[j] = grad_output[j] / b[j];
-                }
-            }
-        }
-    }
-    
-    if (grad_b) {
-        __m256 neg_one = _mm256_set1_ps(-1.0f);
-        
-        #pragma omp parallel for if(n > 10000)
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            size_t chunk_size = (i + 4*VEC_SIZE <= n) ? 4*VEC_SIZE : n - i;
-            
-            if (chunk_size >= 4*VEC_SIZE) {
-                _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                for (size_t j = 0; j < 4; j++) {
-                    size_t idx = i + j*VEC_SIZE;
-                    __m256 vgrad = _mm256_loadu_ps(grad_output + idx);
-                    __m256 va = _mm256_loadu_ps(a + idx);
-                    __m256 vb = _mm256_loadu_ps(b + idx);
-                    __m256 vb_squared = _mm256_mul_ps(vb, vb);
-                    __m256 vresult = _mm256_mul_ps(neg_one, _mm256_div_ps(_mm256_mul_ps(vgrad, va), vb_squared));
-                    _mm256_storeu_ps(grad_b + idx, vresult);
-                }
-            } else {
-                for (size_t j = i; j < i + chunk_size; j++) {
-                    grad_b[j] = -grad_output[j] * a[j] / (b[j] * b[j]);
-                }
-            }
-        }
-    }
+    for (; i < n; i++) out[i] = a[i] / b[i];
 }
 
 void tensor_exp(const float* a, float* out, size_t n) {

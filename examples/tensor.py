@@ -11,7 +11,7 @@ c_size_t = ctypes.c_size_t
 
 
 lib.sanitize_gradients.argtypes = [c_float_p, c_size_t]
-lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, c_float_p]
+lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, ctypes.c_float]
 lib.tensor_add.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_sub.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_mul.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
@@ -21,16 +21,19 @@ lib.tensor_matmul_batch_jit.argtypes = [c_float_p, c_float_p, c_float_p, c_size_
 lib.tensor_op_jit_softmax_ce_with_probs.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t]
 lib.tensor_exp.argtypes = [c_float_p, c_float_p, c_size_t]
 lib.tensor_sum.restype = ctypes.c_float
-lib.tensor_sum.argtypes = [c_float_p, c_size_t]
+lib.tensor_sum.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
 lib.tensor_mean.restype = ctypes.c_float
-lib.tensor_mean.argtypes = [c_float_p, c_size_t]
+lib.tensor_mean.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
 lib.tensor_broadcast_row.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
 lib.tensor_broadcast_col.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_transpose_jit.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t, ctypes.c_size_t, ctypes.c_size_t]
-lib.tensor_add_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_sub_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_mul_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_div_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
+lib.tensor_transpose_jit.argtypes = [
+    ctypes.POINTER(ctypes.c_float),
+    ctypes.POINTER(ctypes.c_float),
+    ctypes.c_size_t,  # ndim
+    ctypes.c_size_t,  # B
+    ctypes.c_size_t,  # M
+    ctypes.c_size_t   # N
+]
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -162,8 +165,7 @@ class Tensor:
 
         raise NotImplementedError(f"Unsupported broadcast from {from_shape} to {to_shape}")
 
-    def _apply_op(self, other, op_name, grad_op_name):
-        """Apply a binary operation between two tensors using C functions."""
+    def _apply_op(self, other, op_name, grad_fn):
         if not isinstance(other, Tensor):
             other = Tensor([other], shape=(1,), requires_grad=False)
 
@@ -174,18 +176,14 @@ class Tensor:
         a = self._broadcast_data(self.data, self.shape, out_shape)
         b = self._broadcast_data(other.data, other.shape, out_shape)
 
-        # Convert to array.array objects
-        a_array = array.array('f', a)
-        b_array = array.array('f', b)
-
         # Prepare output buffer
         out_size = math.prod(out_shape)
         out_data = array.array('f', [0.0] * out_size)
         
         # Call C function
         getattr(lib, op_name)(
-            (ctypes.c_float * len(a_array)).from_buffer(a_array),
-            (ctypes.c_float * len(b_array)).from_buffer(b_array),
+            (ctypes.c_float * len(a))(*a),
+            (ctypes.c_float * len(b))(*b),
             (ctypes.c_float * len(out_data)).from_buffer(out_data),
             len(out_data)
         )
@@ -193,76 +191,53 @@ class Tensor:
         out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape)
 
         if out.requires_grad:
-            # Store a and b for backward pass
-            out._a = a_array
-            out._b = b_array
-            
-            # Define a safer wrapper for C gradient functions
-            def safe_call_grad_func():
-                # Ensure grad arrays are properly initialized
+            def _backward():
                 if self.requires_grad and isinstance(self.grad, list):
                     self.grad = array.array('f', self.grad)
                 if other.requires_grad and isinstance(other.grad, list):
                     other.grad = array.array('f', other.grad)
-                
-                # Use Python implementation for now
-                if grad_op_name == 'tensor_add_grad':
-                    if self.requires_grad:
-                        for i in range(len(self.grad)):
-                            self.grad[i] += out.grad[i]
-                    if other.requires_grad:
-                        for i in range(len(other.grad)):
-                            other.grad[i] += out.grad[i]
-                
-                elif grad_op_name == 'tensor_sub_grad':
-                    if self.requires_grad:
-                        for i in range(len(self.grad)):
-                            self.grad[i] += out.grad[i]
-                    if other.requires_grad:
-                        for i in range(len(other.grad)):
-                            other.grad[i] -= out.grad[i]
-                
-                elif grad_op_name == 'tensor_mul_grad':
-                    if self.requires_grad:
-                        for i in range(len(self.grad)):
-                            self.grad[i] += out.grad[i] * out._b[i]
-                    if other.requires_grad:
-                        for i in range(len(other.grad)):
-                            other.grad[i] += out.grad[i] * out._a[i]
-                
-                elif grad_op_name == 'tensor_div_grad':
-                    if self.requires_grad:
-                        for i in range(len(self.grad)):
-                            self.grad[i] += out.grad[i] / out._b[i]
-                    if other.requires_grad:
-                        for i in range(len(other.grad)):
-                            other.grad[i] -= out.grad[i] * out._a[i] / (out._b[i] * out._b[i])
-            
-            out._backward = safe_call_grad_func
+                 
+                if self.requires_grad:
+                    # Optimize gradient accumulation
+                    self_grad = self.grad
+                    out_grad = out.grad
+                    for i in range(len(self_grad)):
+                        self_grad[i] += grad_fn(a[i], b[i], out_grad[i], 'left')
+
+                if other.requires_grad:
+                    other_grad = other.grad
+                    out_grad = out.grad
+                    for i in range(len(other_grad)):
+                        other_grad[i] += grad_fn(a[i], b[i], out_grad[i], 'right')
+
+            out._backward = _backward
             out._prev = [self, other]
 
         return out
 
     def __add__(self, other):
-        return self._apply_op(other, 'tensor_add', 'tensor_add_grad')
+        return self._apply_op(other, 'tensor_add', lambda a, b, g, l: g)
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __sub__(self, other):
-        return self._apply_op(other, 'tensor_sub', 'tensor_sub_grad')
+        return self._apply_op(other, 'tensor_sub', lambda a, b, g, l: g if l == 'left' else -g)
 
     def __rsub__(self, other):
         return Tensor(other, requires_grad=False).__sub__(self)
 
     def __mul__(self, other):
-        return self._apply_op(other, 'tensor_mul', 'tensor_mul_grad')
+        return self._apply_op(other, 'tensor_mul', lambda a, b, g, l: g * (b if l == 'left' else a))
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __truediv__(self, other):
-        return self._apply_op(other, 'tensor_div', 'tensor_div_grad')
+        return self._apply_op(other, 'tensor_div', lambda a, b, g, l: g / b if l == 'left' else -g * a / (b * b))
+
+    def __rtruediv__(self, other):
+        return Tensor(other, requires_grad=False).__truediv__(self)
 
     def reshape(self, new_shape):
         size = math.prod(new_shape) if new_shape else 1

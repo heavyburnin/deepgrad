@@ -9,10 +9,6 @@ lib = ctypes.cdll.LoadLibrary(os.path.abspath("../build/libsimd_tensor_backend.s
 c_float_p = ctypes.POINTER(ctypes.c_float)
 c_size_t = ctypes.c_size_t
 
-lib.tensor_ops_init.restype = ctypes.c_int
-lib.tensor_ops_init.argtypes = []
-if lib.tensor_ops_init() != 0:
-    raise RuntimeError("Failed to initialize SIMD tensor backend (AVX2 may be missing)")
 
 lib.sanitize_gradients.argtypes = [c_float_p, c_size_t]
 lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, ctypes.c_float]

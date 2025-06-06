@@ -2,7 +2,7 @@ examples/mnist_train.csv
 examples/mnist_train.bin
 examples/mnist_test.csv
 examples/mnist_test.bin
-examples/venv
+venv
 examples/__pycache__
 build/
 model.pkl

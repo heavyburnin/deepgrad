@@ -8,10 +8,9 @@ from functools import lru_cache
 lib = ctypes.cdll.LoadLibrary(os.path.abspath("../build/libsimd_tensor_backend.so"))
 c_float_p = ctypes.POINTER(ctypes.c_float)
 c_size_t = ctypes.c_size_t
-
-
+c_float_p = ctypes.POINTER(ctypes.c_float)
 lib.sanitize_gradients.argtypes = [c_float_p, c_size_t]
-lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, ctypes.c_float]
+lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, c_float_p]
 lib.tensor_add.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_sub.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
 lib.tensor_mul.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
@@ -21,19 +20,30 @@ lib.tensor_matmul_batch_jit.argtypes = [c_float_p, c_float_p, c_float_p, c_size_
 lib.tensor_op_jit_softmax_ce_with_probs.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t]
 lib.tensor_exp.argtypes = [c_float_p, c_float_p, c_size_t]
 lib.tensor_sum.restype = ctypes.c_float
-lib.tensor_sum.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_sum.argtypes = [c_float_p, c_size_t]
 lib.tensor_mean.restype = ctypes.c_float
-lib.tensor_mean.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_mean.argtypes = [c_float_p, c_size_t]
 lib.tensor_broadcast_row.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
 lib.tensor_broadcast_col.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_transpose_jit.argtypes = [
-    ctypes.POINTER(ctypes.c_float),
-    ctypes.POINTER(ctypes.c_float),
-    ctypes.c_size_t,  # ndim
-    ctypes.c_size_t,  # B
-    ctypes.c_size_t,  # M
-    ctypes.c_size_t   # N
+lib.tensor_transpose_jit.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t, ctypes.c_size_t, ctypes.c_size_t]
+lib.tensor_add_grad.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_sub_grad.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_mul_grad.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_div_grad.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
+lib.tensor_unbroadcast_sum_axes.argtypes = [
+    ctypes.POINTER(ctypes.c_float),  # grad
+    ctypes.POINTER(ctypes.c_float),  # out
+    ctypes.POINTER(ctypes.c_size_t),  # shape_grad
+    ctypes.POINTER(ctypes.c_size_t),  # shape_out
+    ctypes.POINTER(ctypes.c_size_t),  # strides_grad
+    ctypes.POINTER(ctypes.c_size_t),  # strides_out
+    ctypes.c_size_t,                 # ndim
+    ctypes.c_size_t,                 # total_grad
+    ctypes.c_size_t,                 # total_out
 ]
+
+# Cache for broadcasted data
+_broadcast_cache = {}
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -80,6 +90,10 @@ class Tensor:
                 len(self.grad)
             )
         return self
+    
+    def tensor_fill_scalar(shape, scalar):
+        size = math.prod(shape)
+        return [scalar] * size
 
     def backward(self):
         if self.grad is None:
@@ -128,7 +142,7 @@ class Tensor:
                 raise ValueError(f"Incompatible shapes for broadcasting: {shape1} and {shape2}")
                 
         return tuple(out_shape)
-
+        
     @staticmethod
     def _broadcast_data(data, from_shape, to_shape):
         """Broadcast data from one shape to another using C acceleration when possible."""
@@ -165,7 +179,56 @@ class Tensor:
 
         raise NotImplementedError(f"Unsupported broadcast from {from_shape} to {to_shape}")
 
-    def _apply_op(self, other, op_name, grad_fn):
+    def _unbroadcast_grad(self, grad, shape):
+        grad_shape = self.shape
+        ndim = len(grad_shape)
+
+        if len(shape) != ndim:
+            # Right-align shapes for broadcasting
+            shape = (1,) * (ndim - len(shape)) + shape
+
+        grad_arr = array.array('f', grad)
+        
+        # Calculate sizes directly without reduce
+        grad_sz = 1
+        for dim in grad_shape:
+            grad_sz *= dim
+            
+        out_sz = 1
+        for dim in shape:
+            out_sz *= dim
+            
+        out_arr = array.array('f', [0.0] * out_sz)
+
+        # Compute strides
+        def compute_strides(shape):
+            strides = [1] * len(shape)
+            for i in reversed(range(len(shape) - 1)):
+                strides[i] = strides[i + 1] * shape[i + 1]
+            return strides
+
+        strides_grad = compute_strides(grad_shape)
+        strides_out = compute_strides(shape)
+
+        # Convert to ctypes arrays
+        c_grad = (ctypes.c_float * grad_sz).from_buffer(grad_arr)
+        c_out = (ctypes.c_float * out_sz).from_buffer(out_arr)
+        c_shape_grad = (ctypes.c_size_t * ndim)(*grad_shape)
+        c_shape_out = (ctypes.c_size_t * ndim)(*shape)
+        c_strides_grad = (ctypes.c_size_t * ndim)(*strides_grad)
+        c_strides_out = (ctypes.c_size_t * ndim)(*strides_out)
+
+        # Call C function
+        lib.tensor_unbroadcast_sum_axes(
+            c_grad, c_out,
+            c_shape_grad, c_shape_out,
+            c_strides_grad, c_strides_out,
+            ndim, grad_sz, out_sz
+        )
+
+        return out_arr
+    
+    def _apply_op(self, other, op_name, grad_fn_name):
         if not isinstance(other, Tensor):
             other = Tensor([other], shape=(1,), requires_grad=False)
 
@@ -192,49 +255,58 @@ class Tensor:
 
         if out.requires_grad:
             def _backward():
-                if self.requires_grad and isinstance(self.grad, list):
-                    self.grad = array.array('f', self.grad)
-                if other.requires_grad and isinstance(other.grad, list):
-                    other.grad = array.array('f', other.grad)
-                 
-                if self.requires_grad:
-                    # Optimize gradient accumulation
-                    self_grad = self.grad
-                    out_grad = out.grad
-                    for i in range(len(self_grad)):
-                        self_grad[i] += grad_fn(a[i], b[i], out_grad[i], 'left')
+                if self.requires_grad and self.grad is None:
+                    self.grad = array.array('f', [0.0] * len(self.data))
+                if other.requires_grad and other.grad is None:
+                    other.grad = array.array('f', [0.0] * len(other.data))
+                
+                out_grad = out.grad
+                a_broadcasted = self._broadcast_data(self.data, self.shape, out_shape)
+                b_broadcasted = self._broadcast_data(other.data, other.shape, out_shape)
 
-                if other.requires_grad:
-                    other_grad = other.grad
-                    out_grad = out.grad
-                    for i in range(len(other_grad)):
-                        other_grad[i] += grad_fn(a[i], b[i], out_grad[i], 'right')
+                if self.requires_grad or other.requires_grad:
+                    self_grad = array.array('f', [0.0] * len(a_broadcasted))
+                    other_grad = array.array('f', [0.0] * len(b_broadcasted))
+                    getattr(lib, grad_fn_name + '_grad')(
+                        (ctypes.c_float * len(out_grad))(*out_grad),
+                        (ctypes.c_float * len(a_broadcasted))(*a_broadcasted),
+                        (ctypes.c_float * len(b_broadcasted))(*b_broadcasted),
+                        (ctypes.c_float * len(self_grad)).from_buffer(self_grad),
+                        (ctypes.c_float * len(other_grad)).from_buffer(other_grad),
+                        len(out_grad)
+                    )
+                    if self.requires_grad:
+                        self_grad = self._unbroadcast_grad(self_grad, self.shape)
+                        self.grad = array.array('f', [a + b for a, b in zip(self.grad, self_grad)])
+                    if other.requires_grad:
+                        other_grad = self._unbroadcast_grad(other_grad, other.shape)
+                        other.grad = array.array('f', [a + b for a, b in zip(other.grad, other_grad)])
 
             out._backward = _backward
             out._prev = [self, other]
 
         return out
-
+    
     def __add__(self, other):
-        return self._apply_op(other, 'tensor_add', lambda a, b, g, l: g)
+        return self._apply_op(other, 'tensor_add', 'tensor_add')
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __sub__(self, other):
-        return self._apply_op(other, 'tensor_sub', lambda a, b, g, l: g if l == 'left' else -g)
+        return self._apply_op(other, 'tensor_sub', 'tensor_sub')
 
     def __rsub__(self, other):
         return Tensor(other, requires_grad=False).__sub__(self)
 
     def __mul__(self, other):
-        return self._apply_op(other, 'tensor_mul', lambda a, b, g, l: g * (b if l == 'left' else a))
+        return self._apply_op(other, 'tensor_mul', 'tensor_mul')
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __truediv__(self, other):
-        return self._apply_op(other, 'tensor_div', lambda a, b, g, l: g / b if l == 'left' else -g * a / (b * b))
+        return self._apply_op(other, 'tensor_div', 'tensor_div')
 
     def __rtruediv__(self, other):
         return Tensor(other, requires_grad=False).__truediv__(self)

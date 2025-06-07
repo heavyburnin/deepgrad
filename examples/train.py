@@ -54,7 +54,7 @@ def evaluate(model, test_path='mnist_test.bin'):
     input_size = 784
     output_size = 10
     num_samples = 10000  # MNIST test set
-    batch_size = 64
+    batch_size = 32
 
     test_data = load_bin_dataset(test_path, num_samples, input_size + output_size)
 
@@ -95,7 +95,7 @@ def train():
     hidden1 = 128
     hidden2 = 64
     num_samples = 60000
-    batch_size = 64
+    batch_size = 32
 
     model = MLP(input_size, hidden1, hidden2, output_size)
     optimizer = SGD(model.parameters(), lr=0.01)

@@ -48,6 +48,18 @@ lib.tensor_unbroadcast_sum_axes.argtypes = [
 lib.tensor_zero.argtypes = [c_float_p, c_size_t]
 lib.tensor_add_inplace.argtypes = [c_float_p, c_float_p, c_size_t]
 lib.tensor_fill_inplace.argtypes = [c_float_p, c_float, c_size_t]
+lib.tensor_matmul_backward.argtypes = [
+    c_float_p,   # A
+    c_float_p,   # B
+    c_float_p,   # grad_out
+    c_float_p,   # grad_A
+    c_float_p,   # grad_B
+    c_size_t,    # batch
+    c_size_t,    # M
+    c_size_t,    # K
+    c_size_t,    # N
+    ctypes.c_bool       # accumulate
+]
 lib.tensor_add_inplace.restype = None
 lib.tensor_fill_inplace.restype = None
 lib.sanitize_gradients.restype = None
@@ -786,39 +798,35 @@ class Tensor:
             )
 
             out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(B, N))
-
+            
             if out.requires_grad:
                 def _backward():
-                    if out.grad is None or all(g == 0.0 for g in out.grad):
+                    if out.grad is None or not any(out.grad):
                         return
-                    
-                    if self.requires_grad:
-                        if isinstance(self.grad, list):
-                            self.grad = array.array('f', self.grad)
-                        
-                        b_T = other.transpose()
-                        dA = out.grad_tensor().matmul(b_T)
-                        
-                        # Use tensor_add_inplace instead of Python loop
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(dA.data)).from_buffer(dA.data),
-                            len(self.grad)
-                        )
-                    
-                    if other.requires_grad:
-                        if isinstance(other.grad, list):
-                            other.grad = array.array('f', other.grad)
-                        
-                        a_T = self.transpose()
-                        dB = a_T.matmul(out.grad_tensor())
-                        
-                        # Use tensor_add_inplace instead of Python loop
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(other.grad)).from_buffer(other.grad),
-                            (ctypes.c_float * len(dB.data)).from_buffer(dB.data),
-                            len(other.grad)
-                        )
+
+                    # Ensure grads are in array format for from_buffer
+                    if self.requires_grad and isinstance(self.grad, list):
+                        self.grad = array.array('f', self.grad)
+
+                    if other.requires_grad and isinstance(other.grad, list):
+                        other.grad = array.array('f', other.grad)
+
+                    grad_out_c = (ctypes.c_float * len(out.grad)).from_buffer(out.grad)
+                    grad_A_ptr = (ctypes.c_float * len(self.grad)).from_buffer(self.grad) if self.requires_grad else None
+                    grad_B_ptr = (ctypes.c_float * len(other.grad)).from_buffer(other.grad) if other.requires_grad else None
+
+                    lib.tensor_matmul_backward(
+                        (ctypes.c_float * len(self.data)).from_buffer(self.data),
+                        (ctypes.c_float * len(other.data)).from_buffer(other.data),
+                        grad_out_c,
+                        grad_A_ptr,
+                        grad_B_ptr,
+                        1,              # batch = 1 for 2D
+                        self.shape[0],  # M
+                        self.shape[1],  # K
+                        other.shape[1], # N
+                        True            # accumulate
+                    )
 
                 out._backward = _backward
                 out._prev = [self, other]
@@ -843,32 +851,45 @@ class Tensor:
             out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(B1, M, N))
 
             if out.requires_grad:
-                # Precompute once
-                #grad_out_c = out.grad_tensor()._cdata
-                grad_out_c = (ctypes.c_float * len(out.grad)).from_buffer(out.grad)
-
-                a_T = self.transpose() if other.requires_grad else None
-                b_T = other.transpose() if self.requires_grad else None
-
                 def _backward():
-                    if out.grad is None or all(g == 0.0 for g in out.grad):
+                    if out.grad is None or not any(out.grad):
                         return
-                    
-                    if self.requires_grad:
-                        lib.tensor_matmul_batch(
+
+                    grad_out_c = (ctypes.c_float * len(out.grad)).from_buffer(out.grad)
+
+                    if self.requires_grad and other.requires_grad:
+                        lib.tensor_matmul_backward(
+                            self._cdata,
+                            other._cdata,
                             grad_out_c,
-                            b_T._cdata,
-                            self._cdata,  # Direct in-place into self.grad memory
-                            B, 1, N, M
+                            self._grad_cdata,  # assume points to self.grad
+                            other._grad_cdata,
+                            B1, M, K1, N,
+                            True
                         )
 
-                    if other.requires_grad:
-                        lib.tensor_matmul_batch(
-                            a_T._cdata,
+                    elif self.requires_grad:
+                        lib.tensor_matmul_backward(
+                            self._cdata,
+                            other._cdata,
                             grad_out_c,
-                            other._cdata,  # Direct in-place into other.grad memory
-                            B, M, 1, N
+                            self._grad_cdata,
+                            None,
+                            B1, M, K1, N,
+                            True
                         )
+
+                    elif other.requires_grad:
+                        lib.tensor_matmul_backward(
+                            self._cdata,
+                            other._cdata,
+                            grad_out_c,
+                            None,
+                            other._grad_cdata,
+                            B1, M, K1, N,
+                            True
+                        )
+
 
                 out._backward = _backward
                 out._prev = [self, other]

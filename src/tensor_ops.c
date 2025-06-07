@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <cpuid.h>
 #include <omp.h>
+#include <stdbool.h>
 
 #define VEC_SIZE 8
 #define MAX_CLASSES 512
@@ -1116,6 +1117,63 @@ void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, f
             );
         }
     }
+}
+
+void tensor_matmul_backward( const float* A, const float* B, const float* grad_out, float* grad_A, float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
+    // B_T and A_T are reused inside
+    float* B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
+    float* A_T = (float*)_mm_malloc(M * K * sizeof(float), 64);
+
+    // Transpose B: [K x N] -> [N x K]
+    #pragma omp parallel for
+    for (size_t k = 0; k < K; ++k)
+        for (size_t n = 0; n < N; ++n)
+            B_T[n * K + k] = B[k * N + n];
+
+    // Transpose A: [M x K] -> [K x M]
+    #pragma omp parallel for
+    for (size_t m = 0; m < M; ++m)
+        for (size_t k = 0; k < K; ++k)
+            A_T[k * M + m] = A[m * K + k];
+
+    // Compute grad_A = grad_out @ B^T
+    #pragma omp parallel for collapse(2)
+    for (size_t b = 0; b < batch; ++b)
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < K; ++j) {
+            float sum = 0.0f;
+            for (size_t k = 0; k < N; ++k) {
+                float go = grad_out[b * M * N + i * N + k];
+                float bt = B_T[k * K + j];
+                sum += go * bt;
+            }
+            if (accumulate)
+                grad_A[b * M * K + i * K + j] += sum;
+            else
+                grad_A[b * M * K + i * K + j] = sum;
+        }
+    }
+
+    // Compute grad_B = A^T @ grad_out
+    #pragma omp parallel for collapse(2)
+    for (size_t b = 0; b < batch; ++b)
+    for (size_t i = 0; i < K; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            for (size_t k = 0; k < M; ++k) {
+                float at = A_T[i * M + k];
+                float go = grad_out[b * M * N + k * N + j];
+                sum += at * go;
+            }
+            if (accumulate)
+                grad_B[b * K * N + i * N + j] += sum;
+            else
+                grad_B[b * K * N + i * N + j] = sum;
+        }
+    }
+
+    _mm_free(B_T);
+    _mm_free(A_T);
 }
 
 // Reductions

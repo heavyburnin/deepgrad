@@ -34,6 +34,16 @@ def load_bin_dataset(bin_path, num_samples, sample_size):
             data.append(sample)
     return data
 
+def save_model(model, filepath):
+    """Save model using dill"""
+    with open(filepath, 'wb') as f:
+        dill.dump(model, f)
+
+def load_model(filepath):
+    """Load model using dill"""
+    with open(filepath, 'rb') as f:
+        return dill.load(f)
+
 def accuracy(pred, target):
     logits = list(pred.data)
     pred_class = [max(range(10), key=lambda i: logits[i + j * 10]) for j in range(len(logits) // 10)]
@@ -85,7 +95,7 @@ def train():
     hidden1 = 128
     hidden2 = 64
     num_samples = 60000
-    batch_size = 32
+    batch_size = 64
 
     model = MLP(input_size, hidden1, hidden2, output_size)
     optimizer = SGD(model.parameters(), lr=0.01)
@@ -132,10 +142,8 @@ def train():
 
         evaluate(model)
 
-    with open('model.pkl', 'wb') as f:
-        dill.dump(model, f)
+    save_model(model, 'model.pkl')
     print("Model saved to model.pkl")
-
 
 #if __name__ == '__main__':
 #    if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):

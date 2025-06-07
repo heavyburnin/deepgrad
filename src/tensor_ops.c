@@ -121,6 +121,21 @@ static inline __m256 exp256_ps(__m256 x) {
     return _mm256_mul_ps(result, pow2n);
 }
 
+void tensor_zero(float* grad, size_t size) {
+    size_t i = 0;
+
+    // Process 8 floats at a time using AVX2
+    __m256 zero = _mm256_setzero_ps();
+    for (; i + 7 < size; i += 8) {
+        _mm256_storeu_ps(grad + i, zero);
+    }
+
+    // Handle remaining floats
+    for (; i < size; ++i) {
+        grad[i] = 0.0f;
+    }
+}
+
 // Sanitize gradients by zeroing out non-finite values (NaN, Inf)
 void sanitize_gradients(float* data, size_t size) {
     size_t i = 0;
@@ -168,6 +183,51 @@ void sgd_update_inplace(float* weights, const float* grads, size_t size, float l
     // Handle remaining elements
     for (; i < size; i++) {
         weights[i] = weights[i] - lr * grads[i];
+    }
+}
+
+void tensor_add_inplace(float* target, const float* source, size_t size) {
+    if (!target || !source) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_add_inplace\n");
+        return;
+    }
+
+    size_t i = 0;
+    const size_t simd_width = 8; // AVX2 processes 8 floats at once
+    size_t simd_end = size - (size % simd_width);
+
+    // SIMD loop
+    #pragma omp parallel for
+    for (i = 0; i < simd_end; i += simd_width) {
+        __m256 t = _mm256_loadu_ps(&target[i]);
+        __m256 s = _mm256_loadu_ps(&source[i]);
+        __m256 result = _mm256_add_ps(t, s);
+        _mm256_storeu_ps(&target[i], result);
+    }
+
+    // Handle tail with scalar addition
+    for (i = simd_end; i < size; i++) {
+        target[i] += source[i];
+    }
+}
+
+void tensor_fill_inplace(float* data, float value, size_t size) {
+    size_t i = 0;
+
+    // Vectorize using AVX2 intrinsics for float
+    __m256 val_vec = _mm256_set1_ps(value);
+
+    // Process in chunks of 8 floats (256 bits)
+    size_t vec_end = size / 8 * 8;
+
+    #pragma omp parallel for
+    for (i = 0; i < vec_end; i += 8) {
+        _mm256_storeu_ps(&data[i], val_vec);
+    }
+
+    // Process any leftover elements
+    for (i = vec_end; i < size; i++) {
+        data[i] = value;
     }
 }
 
@@ -325,6 +385,12 @@ void tensor_transpose(const float* input, float* output, size_t ndim, size_t B, 
     else {
         fprintf(stderr, "Error: Unsupported number of dimensions (%zu) in tensor_transpose\n", ndim);
     }
+}
+
+void tensor_transpose_batch(const float* input, float* output, 
+                         size_t ndim, size_t B, size_t M, size_t N) {
+    // Remove redundant parallel region - already handled in tensor_transpose
+    tensor_transpose(input, output, ndim, B, M, N);
 }
 
 // Efficient broadcasting of a single row [1, N] → [B, N]
@@ -672,7 +738,7 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
     size_t i = 0;
     __m256 zero = _mm256_setzero_ps();
     
-    // Process 32 elements at a time
+    // Process 32 elements at a time (4 * 8 = 32 floats)
     for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
         _mm_prefetch(input + i + 4*VEC_SIZE, _MM_HINT_T0);
         _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
@@ -681,9 +747,11 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
             size_t idx = i + j*VEC_SIZE;
             __m256 vinput = _mm256_loadu_ps(input + idx);
             __m256 vgrad = _mm256_loadu_ps(grad_output + idx);
-            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ); // mask where input > 0
-            __m256 vresult = _mm256_and_ps(vgrad, vmask); // grad * (input > 0)
-            _mm256_storeu_ps(grad_input + idx, vresult);
+            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);
+            __m256 vresult = _mm256_and_ps(vgrad, vmask);
+            __m256 vprev = _mm256_loadu_ps(grad_input + idx);
+            __m256 vsum = _mm256_add_ps(vprev, vresult);
+            _mm256_storeu_ps(grad_input + idx, vsum);
         }
     }
 
@@ -692,11 +760,13 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
         __m256 vgrad = _mm256_loadu_ps(grad_output + i);
         __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);
         __m256 vresult = _mm256_and_ps(vgrad, vmask);
-        _mm256_storeu_ps(grad_input + i, vresult);
+        __m256 vprev = _mm256_loadu_ps(grad_input + i);
+        __m256 vsum = _mm256_add_ps(vprev, vresult);
+        _mm256_storeu_ps(grad_input + i, vsum);
     }
     
     for (; i < n; i++) {
-        grad_input[i] = input[i] > 0.0f ? grad_output[i] : 0.0f;
+        grad_input[i] += input[i] > 0.0f ? grad_output[i] : 0.0f;
     }
 }
 
@@ -801,6 +871,97 @@ void tensor_softmax_cross_entropy_with_probs(const float* logits,
     *loss_out = fabsf(loss); 
 }
 
+void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, const float* target, float* grad_input, size_t B, size_t C ) {
+    size_t total = B * C;
+    size_t i = 0;
+
+    // If grad_loss is NULL, scale = 1.0f for all elements
+    if (grad_loss == NULL) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; i + 8 <= total; i += 8) {
+            __m256 p = _mm256_loadu_ps(probs + i);
+            __m256 t = _mm256_loadu_ps(target + i);
+            __m256 g = _mm256_loadu_ps(grad_input + i);
+
+            __m256 diff = _mm256_sub_ps(p, t);
+            __m256 res = _mm256_add_ps(g, diff); // g += (p - t) * 1.0f
+
+            _mm256_storeu_ps(grad_input + i, res);
+        }
+    } else {
+        // When grad_loss is not NULL, scale varies per batch element
+        for (; i + 8 <= total; i += 8) {
+            // Compute which batch indices these 8 elements belong to
+            // We assume row-major: element i belongs to batch i / C
+            size_t batch_idx0 = (i + 0) / C;
+            size_t batch_idx1 = (i + 1) / C;
+            size_t batch_idx2 = (i + 2) / C;
+            size_t batch_idx3 = (i + 3) / C;
+            size_t batch_idx4 = (i + 4) / C;
+            size_t batch_idx5 = (i + 5) / C;
+            size_t batch_idx6 = (i + 6) / C;
+            size_t batch_idx7 = (i + 7) / C;
+
+            // Gather scales per element from grad_loss (scalar values)
+            float scales[8] = {
+                grad_loss[batch_idx0],
+                grad_loss[batch_idx1],
+                grad_loss[batch_idx2],
+                grad_loss[batch_idx3],
+                grad_loss[batch_idx4],
+                grad_loss[batch_idx5],
+                grad_loss[batch_idx6],
+                grad_loss[batch_idx7]
+            };
+
+            __m256 scale_vec = _mm256_loadu_ps(scales);
+            __m256 p = _mm256_loadu_ps(probs + i);
+            __m256 t = _mm256_loadu_ps(target + i);
+            __m256 g = _mm256_loadu_ps(grad_input + i);
+
+            __m256 diff = _mm256_sub_ps(p, t);
+            __m256 scaled_diff = _mm256_mul_ps(diff, scale_vec);
+            __m256 res = _mm256_add_ps(g, scaled_diff);
+
+            _mm256_storeu_ps(grad_input + i, res);
+        }
+    }
+
+    // Handle remaining elements (tail loop)
+    for (; i < total; ++i) {
+        float scale = grad_loss == NULL ? 1.0f : grad_loss[i / C];
+        grad_input[i] += (probs[i] - target[i]) * scale;
+    }
+}
+
+void tensor_softmax_ce_batch(const float* logits,
+                                         const float* labels,
+                                         float* losses,
+                                         float* probs_out,
+                                         size_t batch,
+                                         size_t class_count) {
+    if (!logits || !labels || !losses || !probs_out) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_op_jit_softmax_ce_with_probs\n");
+        return;
+    }
+    
+    #pragma omp parallel for if(batch > 4)
+    for (size_t i = 0; i < batch; ++i) {
+        const float* logits_row = logits + i * class_count;
+        const float* labels_row = labels + i * class_count;
+        float* probs_row = probs_out + i * class_count;
+        float* loss_ptr = losses + i;
+
+        tensor_softmax_cross_entropy_with_probs(
+            logits_row,
+            labels_row,
+            loss_ptr,
+            probs_row,
+            class_count
+        );
+    }
+}
+
 void tensor_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C,
                    size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
@@ -869,107 +1030,7 @@ void tensor_matmul(const float* __restrict A, const float* __restrict B, float* 
     _mm_free(B_T);
 }
 
-// Reductions
-float tensor_sum(const float* input, size_t len) {
-    if (!input) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_sum\n");
-        return 0.0f;
-    }
-    
-    float total_sum = 0.0f;
-    
-    #pragma omp parallel reduction(+:total_sum) if(len > 100000)
-    {
-        #pragma omp single
-        {
-            size_t i = 0;
-            __m256 vsum1 = _mm256_setzero_ps();
-            __m256 vsum2 = _mm256_setzero_ps();
-            __m256 vsum3 = _mm256_setzero_ps();
-            __m256 vsum4 = _mm256_setzero_ps();
-            
-            // Process 32 elements at a time
-            for (; i + 4*VEC_SIZE <= len; i += 4*VEC_SIZE) {
-                _mm_prefetch(input + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
-                vsum2 = _mm256_add_ps(vsum2, _mm256_loadu_ps(input + i + VEC_SIZE));
-                vsum3 = _mm256_add_ps(vsum3, _mm256_loadu_ps(input + i + 2*VEC_SIZE));
-                vsum4 = _mm256_add_ps(vsum4, _mm256_loadu_ps(input + i + 3*VEC_SIZE));
-            }
-            
-            // Combine the partial sums
-            vsum1 = _mm256_add_ps(vsum1, vsum2);
-            vsum3 = _mm256_add_ps(vsum3, vsum4);
-            vsum1 = _mm256_add_ps(vsum1, vsum3);
-            
-            // Process remaining blocks of 8
-            for (; i + VEC_SIZE <= len; i += VEC_SIZE) {
-                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
-            }
-            
-            // Horizontal sum
-            total_sum = hsum_avx(vsum1);
-            
-            // Process remaining elements
-            for (; i < len; i++) {
-                total_sum += input[i];
-            }
-        }
-    }
-    
-    return total_sum;
-}
-
-float tensor_mean(const float* input, size_t len) {
-    if (!input) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_mean\n");
-        return 0.0f;
-    }
-    
-    if (len == 0) {
-        fprintf(stderr, "Error: Division by zero in tensor_mean\n");
-        return 0.0f;
-    }
-    
-    return tensor_sum(input, len) / (float)len;
-}
-
-void tensor_transpose_jit(const float* input, float* output, 
-                         size_t ndim, size_t B, size_t M, size_t N) {
-    // Remove redundant parallel region - already handled in tensor_transpose
-    tensor_transpose(input, output, ndim, B, M, N);
-}
-
-void tensor_op_jit_softmax_ce_with_probs(const float* logits,
-                                         const float* labels,
-                                         float* losses,
-                                         float* probs_out,
-                                         size_t batch,
-                                         size_t class_count) {
-    if (!logits || !labels || !losses || !probs_out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_op_jit_softmax_ce_with_probs\n");
-        return;
-    }
-    
-    #pragma omp parallel for if(batch > 4)
-    for (size_t i = 0; i < batch; ++i) {
-        const float* logits_row = logits + i * class_count;
-        const float* labels_row = labels + i * class_count;
-        float* probs_row = probs_out + i * class_count;
-        float* loss_ptr = losses + i;
-
-        tensor_softmax_cross_entropy_with_probs(
-            logits_row,
-            labels_row,
-            loss_ptr,
-            probs_row,
-            class_count
-        );
-    }
-}
-
-void tensor_matmul_batch_jit(const float* __restrict A, const float* __restrict B, float* __restrict C,
+void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, float* __restrict C,
                          size_t batch, size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_matmul_batch_jit\n");
@@ -1055,4 +1116,70 @@ void tensor_matmul_batch_jit(const float* __restrict A, const float* __restrict 
             );
         }
     }
+}
+
+// Reductions
+float tensor_sum(const float* input, size_t len) {
+    if (!input) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_sum\n");
+        return 0.0f;
+    }
+    
+    float total_sum = 0.0f;
+    
+    #pragma omp parallel reduction(+:total_sum) if(len > 100000)
+    {
+        #pragma omp single
+        {
+            size_t i = 0;
+            __m256 vsum1 = _mm256_setzero_ps();
+            __m256 vsum2 = _mm256_setzero_ps();
+            __m256 vsum3 = _mm256_setzero_ps();
+            __m256 vsum4 = _mm256_setzero_ps();
+            
+            // Process 32 elements at a time
+            for (; i + 4*VEC_SIZE <= len; i += 4*VEC_SIZE) {
+                _mm_prefetch(input + i + 4*VEC_SIZE, _MM_HINT_T0);
+                
+                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
+                vsum2 = _mm256_add_ps(vsum2, _mm256_loadu_ps(input + i + VEC_SIZE));
+                vsum3 = _mm256_add_ps(vsum3, _mm256_loadu_ps(input + i + 2*VEC_SIZE));
+                vsum4 = _mm256_add_ps(vsum4, _mm256_loadu_ps(input + i + 3*VEC_SIZE));
+            }
+            
+            // Combine the partial sums
+            vsum1 = _mm256_add_ps(vsum1, vsum2);
+            vsum3 = _mm256_add_ps(vsum3, vsum4);
+            vsum1 = _mm256_add_ps(vsum1, vsum3);
+            
+            // Process remaining blocks of 8
+            for (; i + VEC_SIZE <= len; i += VEC_SIZE) {
+                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
+            }
+            
+            // Horizontal sum
+            total_sum = hsum_avx(vsum1);
+            
+            // Process remaining elements
+            for (; i < len; i++) {
+                total_sum += input[i];
+            }
+        }
+    }
+    
+    return total_sum;
+}
+
+float tensor_mean(const float* input, size_t len) {
+    if (!input) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_mean\n");
+        return 0.0f;
+    }
+    
+    if (len == 0) {
+        fprintf(stderr, "Error: Division by zero in tensor_mean\n");
+        return 0.0f;
+    }
+    
+    return tensor_sum(input, len) / (float)len;
 }

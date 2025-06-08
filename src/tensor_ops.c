@@ -122,21 +122,6 @@ static inline __m256 exp256_ps(__m256 x) {
     return _mm256_mul_ps(result, pow2n);
 }
 
-void tensor_zero(float* grad, size_t size) {
-    size_t i = 0;
-
-    // Process 8 floats at a time using AVX2
-    __m256 zero = _mm256_setzero_ps();
-    for (; i + 7 < size; i += 8) {
-        _mm256_storeu_ps(grad + i, zero);
-    }
-
-    // Handle remaining floats
-    for (; i < size; ++i) {
-        grad[i] = 0.0f;
-    }
-}
-
 // Sanitize gradients by zeroing out non-finite values (NaN, Inf)
 void sanitize_gradients(float* data, size_t size) {
     size_t i = 0;
@@ -689,22 +674,6 @@ void tensor_div_grad(const float* dout, const float* a, const float* b, float* d
     }
 }
 
-void tensor_exp(const float* a, float* out, size_t n) {
-    if (!a || !out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_exp\n");
-        return;
-    }
-    
-    size_t i = 0;
-    for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
-        _mm_prefetch(a + i + VEC_SIZE, _MM_HINT_T0);
-        __m256 va = _mm256_loadu_ps(a + i);
-        __m256 vexp = exp256_ps(va);
-        _mm256_storeu_ps(out + i, vexp);
-    }
-    for (; i < n; i++) out[i] = expf(a[i]);
-}
-
 void tensor_relu(const float* a, float* out, size_t n) {
     if (!a || !out) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_relu\n");
@@ -771,7 +740,7 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
     }
 }
 
-void tensor_softmax_cross_entropy_with_probs(const float* logits, 
+void tensor_softmax_cross_entropy(const float* logits, 
                                              const float* labels, 
                                              float* loss_out, 
                                              float* probs_out, 
@@ -872,6 +841,34 @@ void tensor_softmax_cross_entropy_with_probs(const float* logits,
     *loss_out = fabsf(loss); 
 }
 
+void tensor_softmax_ce_batch(const float* logits,
+                                         const float* labels,
+                                         float* losses,
+                                         float* probs_out,
+                                         size_t batch,
+                                         size_t class_count) {
+    if (!logits || !labels || !losses || !probs_out) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_op_jit_softmax_ce_with_probs\n");
+        return;
+    }
+    
+    #pragma omp parallel for if(batch > 4)
+    for (size_t i = 0; i < batch; ++i) {
+        const float* logits_row = logits + i * class_count;
+        const float* labels_row = labels + i * class_count;
+        float* probs_row = probs_out + i * class_count;
+        float* loss_ptr = losses + i;
+
+        tensor_softmax_cross_entropy(
+            logits_row,
+            labels_row,
+            loss_ptr,
+            probs_row,
+            class_count
+        );
+    }
+}
+
 void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, const float* target, float* grad_input, size_t B, size_t C ) {
     size_t total = B * C;
     size_t i = 0;
@@ -935,111 +932,17 @@ void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, con
     }
 }
 
-void tensor_softmax_ce_batch(const float* logits,
-                                         const float* labels,
-                                         float* losses,
-                                         float* probs_out,
-                                         size_t batch,
-                                         size_t class_count) {
-    if (!logits || !labels || !losses || !probs_out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_op_jit_softmax_ce_with_probs\n");
-        return;
-    }
-    
-    #pragma omp parallel for if(batch > 4)
-    for (size_t i = 0; i < batch; ++i) {
-        const float* logits_row = logits + i * class_count;
-        const float* labels_row = labels + i * class_count;
-        float* probs_row = probs_out + i * class_count;
-        float* loss_ptr = losses + i;
-
-        tensor_softmax_cross_entropy_with_probs(
-            logits_row,
-            labels_row,
-            loss_ptr,
-            probs_row,
-            class_count
-        );
-    }
-}
-
-void tensor_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C,
-                   size_t M, size_t K, size_t N) {
-    if (!A || !B || !C) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul\n");
-        return;
-    }
-
-    // For very small matrices, use direct computation
-    if (M * K * N < 10000) {
-        for (size_t i = 0; i < M; i++) {
-            for (size_t j = 0; j < N; j++) {
-                float sum = 0.0f;
-                for (size_t k = 0; k < K; k++) {
-                    sum += A[i * K + k] * B[k * N + j];
-                }
-                C[i * N + j] = sum;
-            }
-        }
-        return;
-    }
-
-    // Align to 64-byte boundary for better cache performance
-    float* __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
-    if (!B_T) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
-        return;
-    }
-
-    // Transpose B with optimized implementation
-    #pragma omp parallel
-    {
-        #pragma omp for
-        for (size_t k = 0; k < K; ++k) {
-            for (size_t n = 0; n < N; ++n) {
-                B_T[n * K + k] = B[k * N + n];
-            }
-        }
-
-        // Compute matrix multiplication with tiling
-        #pragma omp for
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < N; ++j) {
-                __m256 sum_vec = _mm256_setzero_ps();
-                size_t k = 0;
-                
-                // Process 8 elements at a time
-                for (; k + 8 <= K; k += 8) {
-                    __m256 a_vec = _mm256_loadu_ps(&A[i * K + k]);
-                    __m256 b_vec = _mm256_loadu_ps(&B_T[j * K + k]);
-                    sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
-                }
-                
-                // Horizontal sum
-                float sum = hsum_avx(sum_vec);
-                
-                // Handle remaining elements
-                for (; k < K; ++k) {
-                    sum += A[i * K + k] * B_T[j * K + k];
-                }
-                
-                C[i * N + j] = sum;
-            }
-        }
-    }
-
-    _mm_free(B_T);
-}
-
 void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, float* __restrict C,
                          size_t batch, size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul_batch_jit\n");
+        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul_batch\n");
         return;
     }
 
-    // For very small matrices, use direct computation
-    if (M * K * N < 10000) {
+    size_t total_ops = M * K * N;
+
+    // Handle small matrices directly
+    if (total_ops < 10000) {
         #pragma omp parallel for
         for (size_t b = 0; b < batch; ++b) {
             const float* A_b = A + b * M * K;
@@ -1057,69 +960,55 @@ void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, f
         return;
     }
 
-    // For medium-sized matrices, use shared transposed B
-    if (K * N <= 4 * 1024 * 1024) {
-        float* __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
-        if (!B_T) {
-            fprintf(stderr, "Error: Memory allocation failed\n");
-            return;
-        }
+    // Allocate and transpose B once
+    float* __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
+    if (!B_T) {
+        fprintf(stderr, "Error: Memory allocation failed\n");
+        return;
+    }
 
-        // Transpose B once
-        #pragma omp parallel for
-        for (size_t k = 0; k < K; ++k) {
-            for (size_t n = 0; n < N; ++n) {
-                B_T[n * K + k] = B[k * N + n];
-            }
-        }
-
-        // Process all batches in parallel
-        #pragma omp parallel for
-        for (size_t b = 0; b < batch; ++b) {
-            const float* __restrict A_b = A + b * M * K;
-            float* __restrict C_b = C + b * M * N;
-            
-            for (size_t i = 0; i < M; ++i) {
-                for (size_t j = 0; j < N; ++j) {
-                    __m256 sum_vec = _mm256_setzero_ps();
-                    size_t k = 0;
-                    
-                    // Process 8 elements at a time
-                    for (; k + 8 <= K; k += 8) {
-                        __m256 a_vec = _mm256_loadu_ps(&A_b[i * K + k]);
-                        __m256 b_vec = _mm256_loadu_ps(&B_T[j * K + k]);
-                        sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
-                    }
-                    
-                    // Horizontal sum
-                    float sum = hsum_avx(sum_vec);
-                    
-                    // Handle remaining elements
-                    for (; k < K; ++k) {
-                        sum += A_b[i * K + k] * B_T[j * K + k];
-                    }
-                    
-                    C_b[i * N + j] = sum;
-                }
-            }
-        }
-
-        _mm_free(B_T);
-    } else {
-        // For large matrices, process each batch separately
-        #pragma omp parallel for
-        for (size_t b = 0; b < batch; ++b) {
-            tensor_matmul(
-                A + b * M * K,
-                B,
-                C + b * M * N,
-                M, K, N
-            );
+    // Transpose B into B_T: B_T[n * K + k] = B[k * N + n]
+    #pragma omp parallel for
+    for (size_t k = 0; k < K; ++k) {
+        for (size_t n = 0; n < N; ++n) {
+            B_T[n * K + k] = B[k * N + n];
         }
     }
+
+    // Perform batched matrix multiplication using shared B_T
+    #pragma omp parallel for
+    for (size_t b = 0; b < batch; ++b) {
+        const float* __restrict A_b = A + b * M * K;
+        float* __restrict C_b = C + b * M * N;
+
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                __m256 sum_vec = _mm256_setzero_ps();
+                size_t k = 0;
+
+                for (; k + 8 <= K; k += 8) {
+                    __m256 a_vec = _mm256_loadu_ps(&A_b[i * K + k]);
+                    __m256 b_vec = _mm256_loadu_ps(&B_T[j * K + k]);
+                    sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
+                }
+
+                float sum = hsum_avx(sum_vec);
+
+                for (; k < K; ++k) {
+                    sum += A_b[i * K + k] * B_T[j * K + k];
+                }
+
+                C_b[i * N + j] = sum;
+            }
+        }
+    }
+
+    _mm_free(B_T);
 }
 
-void tensor_matmul_backward( const float* A, const float* B, const float* grad_out, float* grad_A, float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
+void tensor_matmul_backward(const float* A, const float* B, const float* grad_out,
+                            float* grad_A, float* grad_B,
+                            size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
     // B_T and A_T are reused inside
     float* B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
     float* A_T = (float*)_mm_malloc(M * K * sizeof(float), 64);
@@ -1138,37 +1027,77 @@ void tensor_matmul_backward( const float* A, const float* B, const float* grad_o
 
     // Compute grad_A = grad_out @ B^T
     #pragma omp parallel for collapse(2)
-    for (size_t b = 0; b < batch; ++b)
-    for (size_t i = 0; i < M; ++i) {
-        for (size_t j = 0; j < K; ++j) {
-            float sum = 0.0f;
-            for (size_t k = 0; k < N; ++k) {
-                float go = grad_out[b * M * N + i * N + k];
-                float bt = B_T[k * K + j];
-                sum += go * bt;
+    for (size_t b = 0; b < batch; ++b) {
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < K; ++j) {
+                __m256 vsum = _mm256_setzero_ps();
+                size_t k = 0;
+                for (; k + 7 < N; k += 8) {
+                    // Load 8 floats of grad_out
+                    __m256 vgrad_out = _mm256_loadu_ps(&grad_out[b * M * N + i * N + k]);
+                    // Load 8 floats of B_T (row k)
+                    __m256 vB_T = _mm256_loadu_ps(&B_T[(k)*K + j]);
+                    vsum = _mm256_fmadd_ps(vgrad_out, vB_T, vsum);
+                }
+                // Horizontal sum vsum
+                float sum = 0.f;
+                float buf[8];
+                _mm256_storeu_ps(buf, vsum);
+                for (int x = 0; x < 8; ++x) sum += buf[x];
+
+                // Handle leftover N elements
+                for (; k < N; ++k) {
+                    sum += grad_out[b * M * N + i * N + k] * B_T[k * K + j];
+                }
+
+                if (accumulate)
+                    grad_A[b * M * K + i * K + j] += sum;
+                else
+                    grad_A[b * M * K + i * K + j] = sum;
             }
-            if (accumulate)
-                grad_A[b * M * K + i * K + j] += sum;
-            else
-                grad_A[b * M * K + i * K + j] = sum;
         }
     }
 
     // Compute grad_B = A^T @ grad_out
     #pragma omp parallel for collapse(2)
-    for (size_t b = 0; b < batch; ++b)
-    for (size_t i = 0; i < K; ++i) {
-        for (size_t j = 0; j < N; ++j) {
-            float sum = 0.0f;
-            for (size_t k = 0; k < M; ++k) {
-                float at = A_T[i * M + k];
-                float go = grad_out[b * M * N + k * N + j];
-                sum += at * go;
+    for (size_t b = 0; b < batch; ++b) {
+        for (size_t i = 0; i < K; ++i) {
+            for (size_t j = 0; j < N; ++j) {
+                __m256 vsum = _mm256_setzero_ps();
+                size_t k = 0;
+                for (; k + 7 < M; k += 8) {
+                    // Load 8 floats from A_T (row i)
+                    __m256 vA_T = _mm256_loadu_ps(&A_T[i * M + k]);
+                    // Load 8 floats from grad_out (row k)
+                    float go_buf[8] = {
+                        grad_out[b * M * N + (k+0) * N + j],
+                        grad_out[b * M * N + (k+1) * N + j],
+                        grad_out[b * M * N + (k+2) * N + j],
+                        grad_out[b * M * N + (k+3) * N + j],
+                        grad_out[b * M * N + (k+4) * N + j],
+                        grad_out[b * M * N + (k+5) * N + j],
+                        grad_out[b * M * N + (k+6) * N + j],
+                        grad_out[b * M * N + (k+7) * N + j],
+                    };
+                    __m256 vgrad_out = _mm256_loadu_ps(go_buf);
+                    vsum = _mm256_fmadd_ps(vA_T, vgrad_out, vsum);
+                }
+                // Horizontal sum
+                float sum = 0.f;
+                float buf[8];
+                _mm256_storeu_ps(buf, vsum);
+                for (int x = 0; x < 8; ++x) sum += buf[x];
+
+                // Handle leftover M elements
+                for (; k < M; ++k) {
+                    sum += A_T[i * M + k] * grad_out[b * M * N + k * N + j];
+                }
+
+                if (accumulate)
+                    grad_B[b * K * N + i * N + j] += sum;
+                else
+                    grad_B[b * K * N + i * N + j] = sum;
             }
-            if (accumulate)
-                grad_B[b * K * N + i * N + j] += sum;
-            else
-                grad_B[b * K * N + i * N + j] = sum;
         }
     }
 

@@ -7,91 +7,54 @@ from functools import lru_cache
 # Set up C library interface
 lib = ctypes.cdll.LoadLibrary(os.path.abspath("../build/libsimd_tensor_backend.so"))
 
+# Define types
 c_float_p = ctypes.POINTER(ctypes.c_float)
 c_size_t_p = ctypes.POINTER(ctypes.c_size_t)
-
-c_size_t = ctypes.c_size_t
 c_float = ctypes.c_float
+c_size_t = ctypes.c_size_t
+c_bool = ctypes.c_bool
 
-lib.sanitize_gradients.argtypes = [c_float_p, c_size_t]
-lib.sgd_update_inplace.argtypes = [c_float_p, c_float_p, c_size_t, c_float_p]
-lib.tensor_add.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_sub.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_mul.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_div.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_relu.argtypes = [c_float_p, c_float_p, c_size_t]
-lib.tensor_matmul_batch.argtypes = [c_float_p, c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t]
-lib.tensor_softmax_ce_batch.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_exp.argtypes = [c_float_p, c_float_p, c_size_t]
-lib.tensor_sum.restype = c_float
-lib.tensor_sum.argtypes = [c_float_p, c_size_t]
-lib.tensor_mean.restype = c_float
-lib.tensor_mean.argtypes = [c_float_p, c_size_t]
-lib.tensor_broadcast_row.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_broadcast_col.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t]
-lib.tensor_transpose_batch.argtypes = [c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t]
-lib.tensor_add_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_sub_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_mul_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_div_grad.argtypes = [c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t]
-lib.tensor_unbroadcast_sum_axes.argtypes = [
-    c_float_p,   # grad
-    c_float_p,   # out
-    c_size_t_p,  # shape_grad
-    c_size_t_p,  # shape_out
-    c_size_t_p,  # strides_grad
-    c_size_t_p,  # strides_out
-    c_size_t,    # ndim
-    c_size_t,    # total_grad
-    c_size_t,    # total_out
-]
-lib.tensor_zero.argtypes = [c_float_p, c_size_t]
-lib.tensor_add_inplace.argtypes = [c_float_p, c_float_p, c_size_t]
-lib.tensor_fill_inplace.argtypes = [c_float_p, c_float, c_size_t]
-lib.tensor_matmul_backward.argtypes = [
-    c_float_p,   # A
-    c_float_p,   # B
-    c_float_p,   # grad_out
-    c_float_p,   # grad_A
-    c_float_p,   # grad_B
-    c_size_t,    # batch
-    c_size_t,    # M
-    c_size_t,    # K
-    c_size_t,    # N
-    ctypes.c_bool       # accumulate
-]
-lib.tensor_add_inplace.restype = None
-lib.tensor_fill_inplace.restype = None
-lib.sanitize_gradients.restype = None
-lib.sgd_update_inplace.restype = None
-lib.tensor_add.restype = None
-lib.tensor_sub.restype = None
-lib.tensor_mul.restype = None
-lib.tensor_div.restype = None
-lib.tensor_relu.restype = None
-lib.tensor_matmul_batch.restype = None
-lib.tensor_softmax_ce_batch.restype = None
-lib.tensor_exp.restype = None
-lib.tensor_broadcast_row.restype = None
-lib.tensor_broadcast_col.restype = None
-lib.tensor_transpose_batch.restype = None
-lib.tensor_add_grad.restype = None
-lib.tensor_sub_grad.restype = None
-lib.tensor_mul_grad.restype = None
-lib.tensor_div_grad.restype = None
-lib.tensor_unbroadcast_sum_axes.restype = None
-lib.tensor_zero.restype = None
+# Define function signatures
+function_signatures = {
+    'sanitize_gradients': ([c_float_p, c_size_t], None),
+    'sgd_update_inplace': ([c_float_p, c_float_p, c_size_t, c_float_p], None),
 
-lib.tensor_softmax_ce_backward.argtypes = [
-    c_float_p,   # grad_loss
-    c_float_p,   # probs
-    c_float_p,   # target
-    c_float_p,   # grad_input
-    c_size_t,                  # B
-    c_size_t                   # C
-]
+    'tensor_add': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_sub': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_mul': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_div': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
 
-lib.tensor_softmax_ce_backward.restype = None
+    'tensor_add_grad': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_sub_grad': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_mul_grad': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t], None),
+    'tensor_div_grad': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t], None),
+
+    'tensor_relu': ([c_float_p, c_float_p, c_size_t], None),
+    'tensor_relu_backward': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
+
+    'tensor_matmul_batch': ([c_float_p, c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t], None),
+    'tensor_matmul_backward': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t,
+                                 c_size_t, c_size_t, c_size_t, c_bool], None),
+
+    'tensor_softmax_ce_batch': ([c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None),
+    'tensor_softmax_ce_backward': ([c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None),
+
+    'tensor_sum': ([c_float_p, c_size_t], c_float),
+    'tensor_mean': ([c_float_p, c_size_t], c_float),
+    
+    'tensor_broadcast_row': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
+    'tensor_broadcast_col': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
+    'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p,c_size_t_p,c_size_t_p,
+                                      c_size_t, c_size_t, c_size_t], None),
+    'tensor_add_inplace': ([c_float_p, c_float_p, c_size_t], None),
+    'tensor_fill_inplace': ([c_float_p, c_float, c_size_t], None),
+}
+
+# Set function signatures
+for func_name, (argtypes, restype) in function_signatures.items():
+    func = getattr(lib, func_name)
+    func.argtypes = argtypes
+    func.restype = restype
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -107,7 +70,6 @@ class Tensor:
         self.requires_grad = requires_grad
         self.grad = array.array('f', [0.0] * len(self.data)) if requires_grad else None
         self._backward = None
-        self._transposed = None  # <- cache slot
         self._prev = []
 
         if shape is not None:
@@ -122,19 +84,6 @@ class Tensor:
     def __len__(self):
         return self.shape[0] if self.shape else 1
 
-    def zero_grad(self):
-        if self.requires_grad and self.grad is not None:
-            grad_ptr = (ctypes.c_float * len(self.grad)).from_buffer(self.grad)
-            lib.tensor_zero(grad_ptr, len(self.grad))
-    
-    def is_zero_grad(self):
-        if self.grad is None:
-            return True
-        for g in self.grad:
-            if g != 0.0:
-                return False
-        return True
-
     def sanitize_gradients(self):
         if self.grad is not None:
             # Convert list to array.array first if it's a list
@@ -147,242 +96,7 @@ class Tensor:
                 len(self.grad)
             )
         return self
-    
-    def reshape(self, new_shape):
-        size = math.prod(new_shape) if new_shape else 1
-        assert size == len(self.data), f"Cannot reshape size {len(self.data)} to {new_shape}"
-        
-        out = Tensor(self.data[:], requires_grad=self.requires_grad, shape=new_shape)
 
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad:
-                    if isinstance(self.grad, list):
-                        self.grad = array.array('f', self.grad)
-
-                    for i in range(len(self.data)):
-                        self.grad[i] += out.grad[i]
-
-            out._backward = _backward
-            out._prev = [self]
-
-        return out
-
-    def grad_tensor(self):
-        # Return Tensor that shares grad buffer to avoid copies
-        if self.grad is None:
-            zeros = array.array('f', [0.0] * len(self.data))
-            return Tensor(zeros, requires_grad=False, shape=self.shape)
-        if isinstance(self.grad, array.array):
-            # Wrap the existing grad buffer (no copy)
-            return Tensor(self.grad, requires_grad=False, shape=self.shape)
-        # fallback: copy if not array.array
-        return Tensor(array.array('f', self.grad), requires_grad=False, shape=self.shape)
-
-    def transpose_back(self):
-        """Transpose tensor dimensions.
-        - For 1D: Convert to column vector (N,) -> (N, 1)
-        - For 2D: Swap dimensions (M, N) -> (N, M)
-        - For 3D: Transpose last two dimensions (B, M, N) -> (B, N, M)
-        """
-        if len(self.shape) == 1:
-            # 1D case: vector to column vector
-            N = self.shape[0]
-            out_shape = (N, 1)
-            transposed_data = array.array('f', [0.0] * N)
-            
-            # Simple copy for 1D case
-            for i in range(N):
-                transposed_data[i] = self.data[i]
-                
-        elif len(self.shape) == 2:
-            # 2D case: matrix transpose
-            M, N = self.shape
-            out_shape = (N, M)
-            transposed_data = array.array('f', [0.0] * (M * N))
-            
-            # Call C implementation for 2D transpose
-            lib.tensor_transpose_batch(
-                (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
-                ctypes.c_size_t(2),  # ndim
-                ctypes.c_size_t(1),  # B (unused for 2D)
-                ctypes.c_size_t(M),
-                ctypes.c_size_t(N)
-            )
-            
-        elif len(self.shape) == 3:
-            # 3D case: batch transpose
-            B, M, N = self.shape
-            out_shape = (B, N, M)
-            transposed_data = array.array('f', [0.0] * (B * M * N))
-            
-            # Call C implementation for 3D batch transpose
-            lib.tensor_transpose_batch(
-                (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
-                ctypes.c_size_t(3),  # ndim
-                ctypes.c_size_t(B),
-                ctypes.c_size_t(M),
-                ctypes.c_size_t(N)
-            )
-        else:
-            raise NotImplementedError(f"Transpose not implemented for {len(self.shape)}D tensors")
-
-        out = Tensor(transposed_data, requires_grad=self.requires_grad, shape=out_shape)
-
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad and out.grad:
-                    if isinstance(self.grad, list):
-                        self.grad = array.array('f', self.grad)
-
-                    if len(self.shape) == 1:
-                        # 1D case: in-place addition
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            len(self.grad)
-                        )
-
-                    elif len(self.shape) == 2:
-                        # 2D case: transpose and then add in-place
-                        M, N = self.shape
-                        temp = array.array('f', [0.0] * len(self.grad))
-                        lib.tensor_transpose_batch(
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            ctypes.c_size_t(2),
-                            ctypes.c_size_t(1),  # B = 1 for 2D
-                            ctypes.c_size_t(N),
-                            ctypes.c_size_t(M)
-                        )
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            len(self.grad)
-                        )
-
-                    elif len(self.shape) == 3:
-                        B, M, N = self.shape
-                        temp = array.array('f', [0.0] * len(self.grad))
-                        lib.tensor_transpose_batch(
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            ctypes.c_size_t(3),
-                            ctypes.c_size_t(B),
-                            ctypes.c_size_t(N),
-                            ctypes.c_size_t(M)
-                        )
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            len(self.grad)
-                        )
-
-            out._backward = _backward
-            out._prev = [self]
-
-        return out
-    
-    def transpose(self):
-        """Return cached transposed tensor if available."""
-        if self._transposed is not None:
-            return self._transposed
-
-        if len(self.shape) == 1:
-            N = self.shape[0]
-            out_shape = (N, 1)
-            transposed_data = array.array('f', [0.0] * N)
-            for i in range(N):
-                transposed_data[i] = self.data[i]
-
-        elif len(self.shape) == 2:
-            M, N = self.shape
-            out_shape = (N, M)
-            transposed_data = array.array('f', [0.0] * (M * N))
-            lib.tensor_transpose_batch(
-                (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
-                ctypes.c_size_t(2),
-                ctypes.c_size_t(1),
-                ctypes.c_size_t(M),
-                ctypes.c_size_t(N)
-            )
-
-        elif len(self.shape) == 3:
-            B, M, N = self.shape
-            out_shape = (B, N, M)
-            transposed_data = array.array('f', [0.0] * (B * M * N))
-            lib.tensor_transpose_batch(
-                (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                (ctypes.c_float * len(transposed_data)).from_buffer(transposed_data),
-                ctypes.c_size_t(3),
-                ctypes.c_size_t(B),
-                ctypes.c_size_t(M),
-                ctypes.c_size_t(N)
-            )
-        else:
-            raise NotImplementedError(f"Transpose not implemented for {len(self.shape)}D tensors")
-
-        out = Tensor(transposed_data, requires_grad=self.requires_grad, shape=out_shape)
-
-        # Caching
-        self._transposed = out
-        out._transposed = self  # inverse cache
-
-        # Preserve autograd logic
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad and out.grad:
-                    if isinstance(self.grad, list):
-                        self.grad = array.array('f', self.grad)
-
-                    if len(self.shape) == 1:
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            len(self.grad)
-                        )
-
-                    elif len(self.shape) == 2:
-                        M, N = self.shape
-                        temp = array.array('f', [0.0] * len(self.grad))
-                        lib.tensor_transpose_batch(
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            ctypes.c_size_t(2),
-                            ctypes.c_size_t(1),
-                            ctypes.c_size_t(N),
-                            ctypes.c_size_t(M)
-                        )
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            len(self.grad)
-                        )
-
-                    elif len(self.shape) == 3:
-                        B, M, N = self.shape
-                        temp = array.array('f', [0.0] * len(self.grad))
-                        lib.tensor_transpose_batch(
-                            (ctypes.c_float * len(out.grad)).from_buffer(out.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            ctypes.c_size_t(3),
-                            ctypes.c_size_t(B),
-                            ctypes.c_size_t(N),
-                            ctypes.c_size_t(M)
-                        )
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(temp)).from_buffer(temp),
-                            len(self.grad)
-                        )
-
-            out._backward = _backward
-            out._prev = [self]
-
-        return out
 
     def backward(self):
         if self.grad is None:
@@ -473,7 +187,7 @@ class Tensor:
                 raise ValueError(f"Incompatible shapes for broadcasting: {shape1} and {shape2}")
                 
         return tuple(out_shape)
-        
+    
     @staticmethod
     def _broadcast_data(data, from_shape, to_shape):
         """Broadcast data from one shape to another using C acceleration when possible."""
@@ -679,105 +393,6 @@ class Tensor:
 
         return out
 
-    def matmul_backup(self, other):
-        assert isinstance(other, Tensor), "Operand must be a Tensor"
-        s1, s2 = self.shape, other.shape
-
-        # Case: [B, M] @ [M, N] => [B, N]
-        if len(s1) == 2 and len(s2) == 2:
-            B, M = s1
-            M2, N = s2
-            assert M == M2, f"Incompatible matmul shapes {s1} and {s2}"
-
-            out_data = array.array('f', [0.0] * (B * N))
-
-            lib.tensor_matmul_batch(
-                self._cdata,
-                other._cdata,
-                (ctypes.c_float * len(out_data)).from_buffer(out_data),
-                B, 1, M, N
-            )
-
-            out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(B, N))
-
-            if out.requires_grad:
-                def _backward():
-                    if self.requires_grad:
-                        if isinstance(self.grad, list):
-                            self.grad = array.array('f', self.grad)
-                        
-                        b_T = other.transpose()
-                        dA = out.grad_tensor().matmul(b_T)
-                        
-                        # Use tensor_add_inplace instead of Python loop
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                            (ctypes.c_float * len(dA.data)).from_buffer(dA.data),
-                            len(self.grad)
-                        )
-                    
-                    if other.requires_grad:
-                        if isinstance(other.grad, list):
-                            other.grad = array.array('f', other.grad)
-                        
-                        a_T = self.transpose()
-                        dB = a_T.matmul(out.grad_tensor())
-                        
-                        # Use tensor_add_inplace instead of Python loop
-                        lib.tensor_add_inplace(
-                            (ctypes.c_float * len(other.grad)).from_buffer(other.grad),
-                            (ctypes.c_float * len(dB.data)).from_buffer(dB.data),
-                            len(other.grad)
-                        )
-
-                out._backward = _backward
-                out._prev = [self, other]
-
-            return out
-
-        # Case: [B, M, K] @ [B, K, N] => [B, M, N]
-        elif len(s1) == 3 and len(s2) == 3:
-            B1, M, K1 = s1
-            B2, K2, N = s2
-            assert B1 == B2 and K1 == K2, f"Incompatible batched matmul shapes {s1} and {s2}"
-
-            out_data = array.array('f', [0.0] * (B1 * M * N))
-
-            lib.tensor_matmul_batch(
-                self._cdata,
-                other._cdata,
-                (ctypes.c_float * len(out_data)).from_buffer(out_data),
-                B1, M, K1, N
-            )
-
-            out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(B1, M, N))
-
-            if out.requires_grad:
-                def _backward():
-                    grad_out = out.grad_tensor()
-
-                    if self.requires_grad:
-                        if isinstance(self.grad, list):
-                            self.grad = array.array('f', self.grad)
-                        b_T = other.transpose()
-                        dA = grad_out.matmul(b_T)
-                        lib.tensor_add_inplace(self._cdata, dA._cdata, len(self.data))
-
-                    if other.requires_grad:
-                        if isinstance(other.grad, list):
-                            other.grad = array.array('f', other.grad)
-                        a_T = self.transpose()
-                        dB = a_T.matmul(grad_out)
-                        lib.tensor_add_inplace(other._cdata, dB._cdata, len(other.data))
-
-                out._backward = _backward
-                out._prev = [self, other]
-
-            return out
-
-        else:
-            raise NotImplementedError(f"Unsupported shapes for matmul: {s1} @ {s2}")
-
     def matmul(self, other):
         assert isinstance(other, Tensor), "Operand must be a Tensor"
         s1, s2 = self.shape, other.shape
@@ -935,10 +550,7 @@ class Tensor:
         return loss.mean()
 
     def mean(self):
-        # Call C implementation for mean calculation
         result = lib.tensor_mean((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
-
-        # Create output tensor with the scalar result
         out = Tensor([result], requires_grad=self.requires_grad)
         
         if out.requires_grad:
@@ -948,10 +560,8 @@ class Tensor:
                         self.grad = array.array('f', self.grad)
                     grad_val = out.grad[0] / len(self.data)
 
-                    # Create an array filled with grad_val
                     grad_array = array.array('f', [grad_val] * len(self.grad))
-
-                    # Add grad_array to self.grad in-place using your optimized C function
+                    
                     lib.tensor_add_inplace(
                         (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
                         (ctypes.c_float * len(grad_array)).from_buffer(grad_array),
@@ -964,10 +574,7 @@ class Tensor:
         return out
 
     def sum(self):
-        # Call C implementation for sum calculation
         result = lib.tensor_sum((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
-
-        # Create output tensor with the scalar result
         out = Tensor([result], requires_grad=self.requires_grad)
         
         if out.requires_grad:
@@ -977,10 +584,8 @@ class Tensor:
                         self.grad = array.array('f', self.grad)
                     grad_val = out.grad[0]
 
-                    # Create an array filled with grad_val
                     grad_array = array.array('f', [grad_val] * len(self.grad))
 
-                    # Add grad_array to self.grad inplace using your C SIMD function
                     lib.tensor_add_inplace(
                         (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
                         (ctypes.c_float * len(grad_array)).from_buffer(grad_array),

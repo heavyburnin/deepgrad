@@ -123,14 +123,13 @@ def train():
     hidden2 = 64
     num_samples = 60000
     batch_size = 32
-
+    sample_size = input_size + output_size
+    
     model = MLP(input_size, hidden1, hidden2, output_size)
     optimizer = SGD(model.parameters(), lr=0.01)
 
     #train_data = load_bin_dataset('mnist_train.bin', num_samples, input_size)
-    train_data, num_samples = load_bin_dataset('mnist_train.bin', num_samples, input_size + 10)
-
-    sample_size = input_size + 10
+    train_data, num_samples = load_bin_dataset('mnist_train.bin', num_samples, sample_size)
 
     for epoch in range(10):
         total_loss = 0.0

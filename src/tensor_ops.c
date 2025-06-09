@@ -10,27 +10,51 @@
 #include <cpuid.h>
 #include <omp.h>
 #include <stdbool.h>
+#include <cpuid.h>
+#include <x86intrin.h>
 
 #define VEC_SIZE 8
 #define MAX_CLASSES 512
 
 // Check for AVX2 support at runtime
-static int has_avx2() {
+int has_avx2() {
     unsigned int eax, ebx, ecx, edx;
-    if (__get_cpuid(7, &eax, &ebx, &ecx, &edx)) {
-        return (ebx & bit_AVX2) != 0;
-    }
-    return 0;
+
+    // Call CPUID with eax = 0 to get highest valid function ID
+    if (!__get_cpuid_max(0, NULL)) return 0;
+
+    // Call CPUID with eax=7, ecx=0 to get extended features
+    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        return 0;
+
+    return (ebx & bit_AVX2) != 0;
 }
 
 // Initialize tensor operations library
 int tensor_ops_init() {
-    //#if (!has_avx2()) {
-    //    fprintf(stderr, "Error: AVX2 not supported on this CPU\n");
-    //    return -1;
-    //}
-     // Hardcode OpenMP thread count
-    omp_set_num_threads(8);  // Set to however many threads you want to use
+    if (!has_avx2()) {
+        fprintf(stderr, "Error: AVX2 not supported on this CPU\n");
+        return -1;
+    }
+    
+    // Use fewer threads than available cores to avoid oversubscription
+    // This prevents thread contention and context switching overhead
+    int num_procs = omp_get_num_procs();
+    int num_threads = num_procs > 4 ? num_procs - 2 : num_procs;
+    
+    // For small matrices, too many threads create more overhead than benefit
+    // Limit to 4-8 threads for typical deep learning workloads
+    if (num_threads > 8) num_threads = 8;
+    
+    omp_set_num_threads(num_threads);
+    
+    // Use dynamic scheduling with small chunk size for better load balancing
+    #ifdef _OPENMP
+    omp_set_schedule(omp_sched_dynamic, 16);
+    #endif
+    
+    fprintf(stderr, "SIMD Tensor Backend initialized with %d threads\n", num_threads);
+    
     return 0;
 }
 
@@ -388,11 +412,20 @@ void tensor_broadcast_row(const float* input, float* output, size_t B, size_t N)
 
     #pragma omp parallel for if (B > 4)
     for (size_t b = 0; b < B; ++b) {
-        memcpy(output + b * N, input, N * sizeof(float));
+        // Use AVX2 vectorized copy for larger chunks
+        size_t i = 0;
+        for (; i + 8 <= N; i += 8) {
+            __m256 vec = _mm256_loadu_ps(&input[i]);
+            _mm256_storeu_ps(&output[b * N + i], vec);
+        }
+        
+        // Handle remaining elements
+        for (; i < N; ++i) {
+            output[b * N + i] = input[i];
+        }
     }
 }
 
-// Broadcast [B, 1] → [B, N] by repeating each scalar across a row
 void tensor_broadcast_col(const float* input, float* output, size_t B, size_t N) {
     if (!input || !output) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_broadcast_col\n");
@@ -402,7 +435,16 @@ void tensor_broadcast_col(const float* input, float* output, size_t B, size_t N)
     #pragma omp parallel for if(B > 4)
     for (size_t i = 0; i < B; ++i) {
         float val = input[i];
-        for (size_t j = 0; j < N; ++j) {
+        __m256 val_vec = _mm256_set1_ps(val);
+        
+        // Process 8 elements at a time with AVX2
+        size_t j = 0;
+        for (; j + 8 <= N; j += 8) {
+            _mm256_storeu_ps(&output[i * N + j], val_vec);
+        }
+        
+        // Handle remaining elements
+        for (; j < N; ++j) {
             output[i * N + j] = val;
         }
     }
@@ -410,8 +452,8 @@ void tensor_broadcast_col(const float* input, float* output, size_t B, size_t N)
 
 // tensor_unbroadcast_sum_axes: generalized reduction over broadcasted axes
 void tensor_unbroadcast_sum_axes(
-    const float* grad, float* out,
-    const size_t* shape_grad,
+    const float* grad,
+    float* out,
     const size_t* shape_out,
     const size_t* strides_grad,
     const size_t* strides_out,
@@ -419,60 +461,96 @@ void tensor_unbroadcast_sum_axes(
     size_t total_grad,
     size_t total_out
 ) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < total_out; ++i) {
-        out[i] = 0.0f;
+    // Initialize output to zero using vectorized operations
+    #pragma omp parallel
+    {
+        const size_t vec_size = 8; // AVX2 processes 8 floats at once
+        __m256 zero_vec = _mm256_setzero_ps();
+        
+        #pragma omp for
+        for (size_t i = 0; i < total_out - (total_out % vec_size); i += vec_size) {
+            _mm256_storeu_ps(&out[i], zero_vec);
+        }
+        
+        // Handle remaining elements
+        #pragma omp for
+        for (size_t i = total_out - (total_out % vec_size); i < total_out; ++i) {
+            out[i] = 0.0f;
+        }
     }
 
-    #pragma omp parallel for
-    for (size_t i = 0; i < total_grad; ++i) {
-        size_t idx = i;
-        size_t out_idx = 0;
-        for (int d = 0; d < ndim; ++d) {
-            size_t pos = idx / strides_grad[d];
-            idx %= strides_grad[d];
-            if (shape_out[d] == 1)
-                continue;  // broadcasted, skip
-            out_idx += pos * strides_out[d];
+    // Create thread-local buffers to avoid atomic operations
+    #pragma omp parallel
+    {
+        float* local_out = (float*)aligned_alloc(32, total_out * sizeof(float));
+        memset(local_out, 0, total_out * sizeof(float));
+        
+        #pragma omp for
+        for (size_t i = 0; i < total_grad; ++i) {
+            size_t idx = i;
+            size_t out_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                size_t pos = idx / strides_grad[d];
+                idx %= strides_grad[d];
+                if (shape_out[d] == 1)
+                    continue;  // broadcasted, skip
+                out_idx += pos * strides_out[d];
+            }
+            local_out[out_idx] += grad[i];
         }
-        #pragma omp atomic
-        out[out_idx] += grad[i];
+        
+        // Reduce thread-local results to the output array
+        #pragma omp critical
+        {
+            const size_t vec_size = 8;
+            for (size_t i = 0; i < total_out - (total_out % vec_size); i += vec_size) {
+                __m256 out_vec = _mm256_loadu_ps(&out[i]);
+                __m256 local_vec = _mm256_loadu_ps(&local_out[i]);
+                _mm256_storeu_ps(&out[i], _mm256_add_ps(out_vec, local_vec));
+            }
+            
+            // Handle remaining elements
+            for (size_t i = total_out - (total_out % vec_size); i < total_out; ++i) {
+                out[i] += local_out[i];
+            }
+        }
+        
+        free(local_out);
     }
 }
 
-// SIMD Elementwise Ops
 void tensor_add(const float* a, const float* b, float* out, size_t n) {
     if (!a || !b || !out) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_add\n");
         return;
     }
     
-    // Process blocks of 4*VEC_SIZE elements in parallel
+    // Align to cache line boundary for better performance
+    const size_t CHUNK_SIZE = 16 * VEC_SIZE; // 16 vectors = 512 bytes with AVX2
+    
     #pragma omp parallel if(n > 10000)
     {
         #pragma omp for
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            if (i + 4*VEC_SIZE <= n) {
-                // Prefetch next cache lines
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
+        for (size_t i = 0; i < n; i += CHUNK_SIZE) {
+            if (i + CHUNK_SIZE <= n) {
+                // Prefetch two chunks ahead
+                _mm_prefetch(a + i + 2*CHUNK_SIZE, _MM_HINT_T0);
+                _mm_prefetch(b + i + 2*CHUNK_SIZE, _MM_HINT_T0);
                 
-                _mm256_storeu_ps(out + i,             _mm256_add_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_add_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_add_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
+                // Unroll 16 vectors for maximum instruction-level parallelism
+                for (size_t j = 0; j < 16; j++) {
+                    __m256 va = _mm256_loadu_ps(a + i + j*VEC_SIZE);
+                    __m256 vb = _mm256_loadu_ps(b + i + j*VEC_SIZE);
+                    _mm256_storeu_ps(out + i + j*VEC_SIZE, _mm256_add_ps(va, vb));
+                }
             } else {
-                // Handle remaining elements
-                for (size_t j = i; j < n; j++) {
-                    if (j + VEC_SIZE <= n && j % VEC_SIZE == 0) {
-                        __m256 va = _mm256_loadu_ps(a + j);
-                        __m256 vb = _mm256_loadu_ps(b + j);
-                        __m256 vout = _mm256_add_ps(va, vb);
-                        _mm256_storeu_ps(out + j, vout);
-                        j += VEC_SIZE - 1; // -1 because loop will increment j
-                    } else {
-                        out[j] = a[j] + b[j];
-                    }
+                // Handle tail with minimal branching
+                size_t j = i;
+                for (; j + VEC_SIZE <= n; j += VEC_SIZE) {
+                    _mm256_storeu_ps(out + j, _mm256_add_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j)));
+                }
+                for (; j < n; j++) {
+                    out[j] = a[j] + b[j];
                 }
             }
         }
@@ -480,19 +558,44 @@ void tensor_add(const float* a, const float* b, float* out, size_t n) {
 }
 
 void tensor_add_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n) {
-    size_t vec_size = n / VEC_SIZE * VEC_SIZE;
+    // Align to cache line boundary for better performance
+    const size_t CHUNK_SIZE = 8 * VEC_SIZE; // 8 vectors = 256 bytes with AVX2
+    const size_t aligned_n = n - (n % VEC_SIZE);
+    
     #pragma omp parallel if(n > 10000)
     {
         #pragma omp for
-        for (size_t i = 0; i < vec_size; i += VEC_SIZE) {
-            __m256 v_dout = _mm256_loadu_ps(dout + i);
-            _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_dout));
-            _mm256_storeu_ps(db + i, _mm256_add_ps(_mm256_loadu_ps(db + i), v_dout));
-        }
-        #pragma omp for
-        for (size_t i = vec_size; i < n; i++) {
-            da[i] += dout[i];
-            db[i] += dout[i];
+        for (size_t i = 0; i < n; i += CHUNK_SIZE) {
+            if (i + CHUNK_SIZE <= aligned_n) {
+                // Prefetch ahead
+                _mm_prefetch(dout + i + 2*CHUNK_SIZE, _MM_HINT_T0);
+                _mm_prefetch(da + i + 2*CHUNK_SIZE, _MM_HINT_T0);
+                _mm_prefetch(db + i + 2*CHUNK_SIZE, _MM_HINT_T0);
+                
+                // Process 8 vectors at once with explicit loading to help compiler optimize
+                for (size_t j = 0; j < 8; j++) {
+                    size_t idx = i + j*VEC_SIZE;
+                    __m256 v_dout = _mm256_loadu_ps(dout + idx);
+                    __m256 v_da = _mm256_loadu_ps(da + idx);
+                    __m256 v_db = _mm256_loadu_ps(db + idx);
+                    
+                    _mm256_storeu_ps(da + idx, _mm256_add_ps(v_da, v_dout));
+                    _mm256_storeu_ps(db + idx, _mm256_add_ps(v_db, v_dout));
+                }
+            } else {
+                // Handle tail elements
+                for (size_t j = i; j < n; j++) {
+                    if (j + VEC_SIZE <= n) {
+                        __m256 v_dout = _mm256_loadu_ps(dout + j);
+                        _mm256_storeu_ps(da + j, _mm256_add_ps(_mm256_loadu_ps(da + j), v_dout));
+                        _mm256_storeu_ps(db + j, _mm256_add_ps(_mm256_loadu_ps(db + j), v_dout));
+                        j += VEC_SIZE - 1;
+                    } else {
+                        da[j] += dout[j];
+                        db[j] += dout[j];
+                    }
+                }
+            }
         }
     }
 }
@@ -875,7 +978,6 @@ void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, con
 
     // If grad_loss is NULL, scale = 1.0f for all elements
     if (grad_loss == NULL) {
-        __m256 one = _mm256_set1_ps(1.0f);
         for (; i + 8 <= total; i += 8) {
             __m256 p = _mm256_loadu_ps(probs + i);
             __m256 t = _mm256_loadu_ps(target + i);

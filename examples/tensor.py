@@ -13,9 +13,11 @@ c_size_t_p = ctypes.POINTER(ctypes.c_size_t)
 c_float = ctypes.c_float
 c_size_t = ctypes.c_size_t
 c_bool = ctypes.c_bool
-
+c_int = ctypes.c_int
 # Define function signatures
 function_signatures = {
+    'tensor_ops_init': ([], c_int),
+
     'sanitize_gradients': ([c_float_p, c_size_t], None),
     'sgd_update_inplace': ([c_float_p, c_float_p, c_size_t, c_float_p], None),
 
@@ -44,8 +46,9 @@ function_signatures = {
     
     'tensor_broadcast_row': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
     'tensor_broadcast_col': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
-    'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p,c_size_t_p,c_size_t_p,
+    'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p, c_size_t_p,
                                       c_size_t, c_size_t, c_size_t], None),
+
     'tensor_add_inplace': ([c_float_p, c_float_p, c_size_t], None),
     'tensor_fill_inplace': ([c_float_p, c_float, c_size_t], None),
 }
@@ -58,14 +61,16 @@ for func_name, (argtypes, restype) in function_signatures.items():
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
-        if isinstance(data, array.array) and data.typecode == 'f':
-            self.data = data
-        elif isinstance(data, array.array):
-            self.data = array.array('f', data)
+        if isinstance(data, array.array):
+            if data.typecode != 'f':
+                self.data = array.array('f', data)
+            else:
+                self.data = data
         elif isinstance(data, list):
             self.data = array.array('f', data)
         else:
             self.data = array.array('f', [float(data)])
+
 
         self.requires_grad = requires_grad
         self.grad = array.array('f', [0.0] * len(self.data)) if requires_grad else None
@@ -77,9 +82,58 @@ class Tensor:
         else:
             self.shape = (len(self.data),)
             
-        # Validate shape matches data length
         expected_size = math.prod(self.shape) if self.shape else 1
         assert len(self.data) == expected_size, f"Shape {self.shape} incompatible with data length {len(self.data)}"
+
+    def backward(self):
+        visited = set()
+        topo = []
+        
+        def build_topo(t):
+            if t not in visited:
+                visited.add(t)
+                for p in t._prev:
+                    build_topo(p)
+                topo.append(t)
+        
+        build_topo(self)
+        
+        for t in topo:
+            if t.requires_grad and t.grad is None:
+                t.grad = array.array('f', [0.0] * len(t.data))
+        
+        lib.tensor_fill_inplace(self._grad_cdata, ctypes.c_float(1.0), ctypes.c_size_t(len(self.grad)))
+        
+        for t in reversed(topo):
+            if t._backward is not None:
+                t._backward()
+            if t.grad is not None:
+                t.sanitize_gradients()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        
+        if 'data' in state and isinstance(state['data'], array.array):
+            state['data'] = list(state['data'])
+        
+        if 'grad' in state and state['grad'] is not None:
+            if isinstance(state['grad'], array.array):
+                state['grad'] = list(state['grad'])
+        
+        if '_cdata_cache' in state:
+            del state['_cdata_cache']
+        
+        return state
+
+    def __setstate__(self, state):
+        if 'data' in state and isinstance(state['data'], list):
+            state['data'] = array.array('f', state['data'])
+        
+        if 'grad' in state and state['grad'] is not None:
+            if isinstance(state['grad'], list):
+                state['grad'] = array.array('f', state['grad'])
+        
+        self.__dict__.update(state)
 
     def __len__(self):
         return self.shape[0] if self.shape else 1
@@ -96,82 +150,24 @@ class Tensor:
                 len(self.grad)
             )
         return self
-
-
-    def backward(self):
-        if self.grad is None:
-            self.grad = array.array('f', [0.0] * len(self.data))
-
-        # Set initial gradient to 1.0 using C fill
-        lib.tensor_fill_inplace(
-            (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-            ctypes.c_float(1.0),
-            ctypes.c_size_t(len(self.grad))
-        )
-            
-        # Build computational graph
-        visited = set()
-        topo = []
-
-        def build_topo(t):
-            if t not in visited:
-                visited.add(t)
-                for p in t._prev:
-                    build_topo(p)
-                topo.append(t)
-
-        build_topo(self)
-        
-        # Backward pass
-        for t in reversed(topo):
-            if t._backward is not None:
-                t._backward()
-            # Sanitize gradients after each backward step
-            if t.grad is not None:
-                t.sanitize_gradients()
-
-    def __getstate__(self):
-        """Prepare object for serialization with dill/pickle"""
-        state = self.__dict__.copy()
-        
-        # Convert array.array to list
-        if 'data' in state and isinstance(state['data'], array.array):
-            state['data'] = list(state['data'])
-        
-        # Convert grad array to list if it exists
-        if 'grad' in state and state['grad'] is not None:
-            if isinstance(state['grad'], array.array):
-                state['grad'] = list(state['grad'])
-        
-        # Remove cached ctypes data
-        if '_cdata_cache' in state:
-            del state['_cdata_cache']
-        
-        return state
-
-    def __setstate__(self, state):
-        """Restore object after deserialization with dill/pickle"""
-        # Convert lists back to array.array
-        if 'data' in state and isinstance(state['data'], list):
-            state['data'] = array.array('f', state['data'])
-        
-        if 'grad' in state and state['grad'] is not None:
-            if isinstance(state['grad'], list):
-                state['grad'] = array.array('f', state['grad'])
-        
-        self.__dict__.update(state)
-
+    
     @property
     def _cdata(self):
-        """Cached ctypes float* pointer to the tensor's data."""
         if not hasattr(self, '_cdata_cache') or len(self._cdata_cache) != len(self.data):
-            self._cdata_cache = (ctypes.c_float * len(self.data)).from_buffer(self.data)
+            self._cdata_cache = (c_float * len(self.data)).from_buffer(self.data)
         return self._cdata_cache
+    
+    @property
+    def _grad_cdata(self):
+        if self.grad is None:
+            return None
+        if not hasattr(self, '_grad_cdata_cache') or len(self._grad_cdata_cache) != len(self.grad):
+            self._grad_cdata_cache = (c_float * len(self.grad)).from_buffer(self.grad)
+        return self._grad_cdata_cache
 
     @staticmethod
     @lru_cache(maxsize=128)
     def _compute_broadcast_shape(shape1, shape2):
-        """Compute output shape for broadcasting with caching for performance."""
         if len(shape1) != len(shape2):
             raise ValueError(f"Only same-rank tensors supported for broadcasting (got {shape1} and {shape2})")
             
@@ -201,8 +197,8 @@ class Tensor:
                 B, N = to_shape
                 result = array.array('f', [0.0] * (B * N))
                 lib.tensor_broadcast_row(
-                    (ctypes.c_float * len(data)).from_buffer(data),
-                    (ctypes.c_float * len(result)).from_buffer(result),
+                    (c_float * len(data)).from_buffer(data),
+                    (c_float * len(result)).from_buffer(result),
                     B, N
                 )
                 return result
@@ -212,8 +208,8 @@ class Tensor:
                 B, N = to_shape
                 result = array.array('f', [0.0] * (B * N))
                 lib.tensor_broadcast_col(
-                    (ctypes.c_float * len(data)).from_buffer(data),
-                    (ctypes.c_float * len(result)).from_buffer(result),
+                    (c_float * len(data)).from_buffer(data),
+                    (c_float * len(result)).from_buffer(result),
                     B, N
                 )
                 return result
@@ -256,17 +252,15 @@ class Tensor:
         strides_out = compute_strides(shape)
 
         # Convert to ctypes arrays
-        c_grad = (ctypes.c_float * grad_sz).from_buffer(grad_arr)
-        c_out = (ctypes.c_float * out_sz).from_buffer(out_arr)
-        c_shape_grad = (ctypes.c_size_t * ndim)(*grad_shape)
-        c_shape_out = (ctypes.c_size_t * ndim)(*shape)
-        c_strides_grad = (ctypes.c_size_t * ndim)(*strides_grad)
-        c_strides_out = (ctypes.c_size_t * ndim)(*strides_out)
+        c_grad = (c_float * grad_sz).from_buffer(grad_arr)
+        c_out = (c_float * out_sz).from_buffer(out_arr)
+        c_shape_out = (c_size_t * ndim)(*shape)
+        c_strides_grad = (c_size_t * ndim)(*strides_grad)
+        c_strides_out = (c_size_t * ndim)(*strides_out)
 
         # Call C function
         lib.tensor_unbroadcast_sum_axes(
-            c_grad, c_out,
-            c_shape_grad, c_shape_out,
+            c_grad, c_out, c_shape_out,
             c_strides_grad, c_strides_out,
             ndim, grad_sz, out_sz
         )
@@ -281,18 +275,17 @@ class Tensor:
         out_shape = self._compute_broadcast_shape(self.shape, other.shape)
         
         # Broadcast data
-        a = self._broadcast_data(self.data, self.shape, out_shape)
-        b = self._broadcast_data(other.data, other.shape, out_shape)
+        a_broadcasted = self._broadcast_data(self.data, self.shape, out_shape)
+        b_broadcasted = self._broadcast_data(other.data, other.shape, out_shape)
 
         # Prepare output buffer
         out_size = math.prod(out_shape)
         out_data = array.array('f', [0.0] * out_size)
         
-        # Call C function using from_buffer to avoid copying
         getattr(lib, op_name)(
-            (ctypes.c_float * len(a)).from_buffer(a),
-            (ctypes.c_float * len(b)).from_buffer(b),
-            (ctypes.c_float * len(out_data)).from_buffer(out_data),
+            self._cdata if len(a_broadcasted) == len(self.data) else (c_float * len(a_broadcasted)).from_buffer(a_broadcasted),
+            other._cdata if len(b_broadcasted) == len(other.data) else (c_float * len(b_broadcasted)).from_buffer(b_broadcasted),
+            (c_float * len(out_data)).from_buffer(out_data),
             len(out_data)
         )
 
@@ -306,26 +299,37 @@ class Tensor:
                     other.grad = array.array('f', [0.0] * len(other.data))
                 
                 out_grad = out.grad
-                a_broadcasted = self._broadcast_data(self.data, self.shape, out_shape)
-                b_broadcasted = self._broadcast_data(other.data, other.shape, out_shape)
 
                 if self.requires_grad or other.requires_grad:
                     self_grad = array.array('f', [0.0] * len(a_broadcasted))
                     other_grad = array.array('f', [0.0] * len(b_broadcasted))
                     getattr(lib, grad_fn_name + '_grad')(
-                        (ctypes.c_float * len(out_grad)).from_buffer(out_grad),
-                        (ctypes.c_float * len(a_broadcasted)).from_buffer(a_broadcasted),
-                        (ctypes.c_float * len(b_broadcasted)).from_buffer(b_broadcasted),
-                        (ctypes.c_float * len(self_grad)).from_buffer(self_grad),
-                        (ctypes.c_float * len(other_grad)).from_buffer(other_grad),
+                        (c_float * len(out_grad)).from_buffer(out_grad),
+                        (c_float * len(a_broadcasted)).from_buffer(a_broadcasted),
+                        (c_float * len(b_broadcasted)).from_buffer(b_broadcasted),
+                        (c_float * len(self_grad)).from_buffer(self_grad),
+                        (c_float * len(other_grad)).from_buffer(other_grad),
                         len(out_grad)
                     )
                     if self.requires_grad:
-                        self_grad = self._unbroadcast_grad(self_grad, self.shape)
-                        self.grad = array.array('f', [a + b for a, b in zip(self.grad, self_grad)])
+                        self_grad = array.array('f', self._unbroadcast_grad(self_grad, self.shape))
+                        lib.tensor_add_inplace(
+                            (c_float * len(self.grad)).from_buffer(self.grad),
+                            (c_float * len(self_grad)).from_buffer(self_grad),
+                            len(self.grad)
+                        )
+
+
                     if other.requires_grad:
-                        other_grad = self._unbroadcast_grad(other_grad, other.shape)
-                        other.grad = array.array('f', [a + b for a, b in zip(other.grad, other_grad)])
+                        other_grad = array.array('f', self._unbroadcast_grad(other_grad, other.shape))
+                        # Ensure other.grad is an array.array
+                        if isinstance(other.grad, list):
+                            other.grad = array.array('f', other.grad)
+                        lib.tensor_add_inplace(
+                            (c_float * len(other.grad)).from_buffer(other.grad),
+                            (c_float * len(other_grad)).from_buffer(other_grad),
+                            len(other.grad)
+                        )
 
             out._backward = _backward
             out._prev = [self, other]
@@ -360,8 +364,8 @@ class Tensor:
         out_data = array.array('f', [0.0] * len(self.data))
 
         lib.tensor_relu(
-            (ctypes.c_float * len(self.data)).from_buffer(self.data),
-            (ctypes.c_float * len(out_data)).from_buffer(out_data),
+            (c_float * len(self.data)).from_buffer(self.data),
+            (c_float * len(out_data)).from_buffer(out_data),
             len(self.data)
         )
 
@@ -382,9 +386,9 @@ class Tensor:
                         out.grad = array.array('f', [0.0]*len(self.data))
 
                     lib.tensor_relu_backward(
-                        (ctypes.c_float * len(self.data)).from_buffer(out.grad),
-                        (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                        (ctypes.c_float * len(self.data)).from_buffer(self.grad),
+                        (c_float * len(self.data)).from_buffer(out.grad),
+                        (c_float * len(self.data)).from_buffer(self.data),
+                        (c_float * len(self.data)).from_buffer(self.grad),
                         len(self.data)
                     )
 
@@ -408,7 +412,7 @@ class Tensor:
             lib.tensor_matmul_batch(
                 self._cdata,
                 other._cdata,
-                (ctypes.c_float * len(out_data)).from_buffer(out_data),
+                (c_float * len(out_data)).from_buffer(out_data),
                 B, 1, M, N
             )
 
@@ -426,13 +430,13 @@ class Tensor:
                     if other.requires_grad and isinstance(other.grad, list):
                         other.grad = array.array('f', other.grad)
 
-                    grad_out_c = (ctypes.c_float * len(out.grad)).from_buffer(out.grad)
-                    grad_A_ptr = (ctypes.c_float * len(self.grad)).from_buffer(self.grad) if self.requires_grad else None
-                    grad_B_ptr = (ctypes.c_float * len(other.grad)).from_buffer(other.grad) if other.requires_grad else None
+                    grad_out_c = (c_float * len(out.grad)).from_buffer(out.grad)
+                    grad_A_ptr = (c_float * len(self.grad)).from_buffer(self.grad) if self.requires_grad else None
+                    grad_B_ptr = (c_float * len(other.grad)).from_buffer(other.grad) if other.requires_grad else None
 
                     lib.tensor_matmul_backward(
-                        (ctypes.c_float * len(self.data)).from_buffer(self.data),
-                        (ctypes.c_float * len(other.data)).from_buffer(other.data),
+                        (c_float * len(self.data)).from_buffer(self.data),
+                        (c_float * len(other.data)).from_buffer(other.data),
                         grad_out_c,
                         grad_A_ptr,
                         grad_B_ptr,
@@ -459,7 +463,7 @@ class Tensor:
             lib.tensor_matmul_batch(
                 self._cdata,
                 other._cdata,
-                (ctypes.c_float * len(out_data)).from_buffer(out_data),
+                (c_float * len(out_data)).from_buffer(out_data),
                 B1, M, K1, N
             )
 
@@ -470,7 +474,7 @@ class Tensor:
                     if out.grad is None or not any(out.grad):
                         return
 
-                    grad_out_c = (ctypes.c_float * len(out.grad)).from_buffer(out.grad)
+                    grad_out_c = (c_float * len(out.grad)).from_buffer(out.grad)
 
                     if self.requires_grad and other.requires_grad:
                         lib.tensor_matmul_backward(
@@ -521,10 +525,10 @@ class Tensor:
         probs_data = array.array('f', [0.0] * (B * C))
 
         lib.tensor_softmax_ce_batch(
-            (ctypes.c_float * len(self.data)).from_buffer(self.data),
-            (ctypes.c_float * len(target.data)).from_buffer(target.data),
-            (ctypes.c_float * B).from_buffer(loss_data),
-            (ctypes.c_float * (B * C)).from_buffer(probs_data),
+            (c_float * len(self.data)).from_buffer(self.data),
+            (c_float * len(target.data)).from_buffer(target.data),
+            (c_float * B).from_buffer(loss_data),
+            (c_float * (B * C)).from_buffer(probs_data),
             B, C
         )
 
@@ -537,10 +541,10 @@ class Tensor:
                     if isinstance(self.grad, list):
                         self.grad = array.array('f', self.grad)
                     lib.tensor_softmax_ce_backward(
-                        (ctypes.c_float * len(loss.grad)).from_buffer(loss.grad),
-                        (ctypes.c_float * len(probs.data)).from_buffer(probs.data),
-                        (ctypes.c_float * len(target.data)).from_buffer(target.data),
-                        (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
+                        (c_float * len(loss.grad)).from_buffer(loss.grad),
+                        (c_float * len(probs.data)).from_buffer(probs.data),
+                        (c_float * len(target.data)).from_buffer(target.data),
+                        (c_float * len(self.grad)).from_buffer(self.grad),
                         B, C
                     )
 
@@ -550,7 +554,7 @@ class Tensor:
         return loss.mean()
 
     def mean(self):
-        result = lib.tensor_mean((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
+        result = lib.tensor_mean((c_float * len(self.data)).from_buffer(self.data), len(self.data))
         out = Tensor([result], requires_grad=self.requires_grad)
         
         if out.requires_grad:
@@ -563,8 +567,8 @@ class Tensor:
                     grad_array = array.array('f', [grad_val] * len(self.grad))
                     
                     lib.tensor_add_inplace(
-                        (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                        (ctypes.c_float * len(grad_array)).from_buffer(grad_array),
+                        (c_float * len(self.grad)).from_buffer(self.grad),
+                        (c_float * len(grad_array)).from_buffer(grad_array),
                         len(self.grad)
                     )
 
@@ -574,7 +578,7 @@ class Tensor:
         return out
 
     def sum(self):
-        result = lib.tensor_sum((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
+        result = lib.tensor_sum((c_float * len(self.data)).from_buffer(self.data), len(self.data))
         out = Tensor([result], requires_grad=self.requires_grad)
         
         if out.requires_grad:
@@ -587,8 +591,8 @@ class Tensor:
                     grad_array = array.array('f', [grad_val] * len(self.grad))
 
                     lib.tensor_add_inplace(
-                        (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                        (ctypes.c_float * len(grad_array)).from_buffer(grad_array),
+                        (c_float * len(self.grad)).from_buffer(self.grad),
+                        (c_float * len(grad_array)).from_buffer(grad_array),
                         len(self.grad)
                     )
                     
@@ -599,3 +603,10 @@ class Tensor:
 
     def __repr__(self):
         return f"Tensor(shape={self.shape}, data={list(self.data)}, grad={list(self.grad) if self.grad else None})"
+    
+def _init_backend():
+    result = lib.tensor_ops_init()
+    if result != 0:
+        raise RuntimeError("tensor_ops_init failed (AVX2 unsupported?)")
+    
+_init_backend()

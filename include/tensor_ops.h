@@ -35,21 +35,13 @@ void tensor_softmax_ce_backward(const float* grad_loss, const float* probs, cons
 // Matmul
 void tensor_matmul_batch(const float* A, const float* B, float* C, size_t batch, size_t M, size_t K, size_t N);
 void tensor_matmul_backward(const float* A, const float* B, const float* grad_out, float* grad_A,
-                        float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate);
+                            float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate);
 
 // Broadcasting
 void tensor_broadcast_row(const float* input, float* output, size_t B, size_t N);
 void tensor_broadcast_col(const float* input, float* output, size_t B, size_t N);
-void tensor_unbroadcast_sum_axes(
-    const float* grad_output,
-    float* grad_input,
-    const size_t* shape_output,
-    const size_t* shape_input,
-    const size_t* strides_output,
-    const size_t* strides_input,
-    size_t ndim,
-    size_t size_output,
-    size_t size_input
+void tensor_unbroadcast_sum_axes(const float* grad, float* out, const size_t* shape_out, const size_t* strides_output,
+                                const size_t* strides_input, size_t ndim, size_t total_grad, size_t total_out
 );
 
 // Transpose

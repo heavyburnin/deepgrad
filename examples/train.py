@@ -1,4 +1,3 @@
-import struct
 import random
 import os
 import dill
@@ -6,10 +5,10 @@ from tensor import Tensor
 from model import MLP
 from optimizer import SGD
 from tqdm import tqdm
-import cProfile
-import pstats
 import array
 import mmap
+import cProfile
+import pstats
 
 def convert_csv_to_bin(csv_path, bin_path):
     with open(csv_path, 'r') as f_csv, open(bin_path, 'wb') as f_bin:
@@ -28,32 +27,35 @@ def convert_csv_to_bin(csv_path, bin_path):
             f_bin.write(sample.tobytes())
 
 def load_bin_dataset(bin_path, num_samples, sample_size):
-    expected_floats = num_samples * sample_size
-    expected_bytes = expected_floats * 4  # float32 = 4 bytes
-
     with open(bin_path, 'rb') as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)  # map full file
-        actual_bytes = os.fstat(f.fileno()).st_size
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        actual_bytes = mm.size()
+        expected_bytes = num_samples * sample_size * 4
 
         if actual_bytes < expected_bytes:
-            print(f"[WARN] File is smaller than expected. Shrinking num_samples.")
+            print(f"[WARN] File smaller than expected. Shrinking num_samples.")
             num_samples = actual_bytes // (sample_size * 4)
-            expected_floats = num_samples * sample_size
-            expected_bytes = expected_floats * 4
 
-        data = array.array('f')
-        data.frombytes(mm[:expected_bytes])
-        mm.close()
+        return mm, num_samples, sample_size
 
-    return data, num_samples
+def build_batch_from_mmap(mm, sample_indices, sample_size):
+    sample_bytes = sample_size * 4
+    batch_bytes = bytearray(len(sample_indices) * sample_bytes)
+    mv = memoryview(batch_bytes)
+
+    for i, sample_idx in enumerate(sample_indices):
+        offset = sample_idx * sample_bytes
+        mv[i*sample_bytes:(i+1)*sample_bytes] = mm[offset:offset+sample_bytes]
+
+    batch_array = array.array('f')
+    batch_array.frombytes(batch_bytes)
+    return batch_array
         
 def save_model(model, filepath):
-    """Save model using dill"""
     with open(filepath, 'wb') as f:
         dill.dump(model, f)
 
 def load_model(filepath):
-    """Load model using dill"""
     with open(filepath, 'rb') as f:
         return dill.load(f)
 
@@ -67,28 +69,28 @@ def evaluate(model, test_path='mnist_test.bin'):
     input_size = 784
     output_size = 10
     sample_size = input_size + output_size
-    num_samples = 10000
     batch_size = 32
+    num_samples = 10000
 
-    test_data, num_samples = load_bin_dataset(test_path, num_samples, sample_size)
+    mm, num_samples, _ = load_bin_dataset(test_path, num_samples, sample_size)
 
     total_loss = 0.0
     correct = 0.0
-    total = 0.0
+    total = 0
 
     for i in range(0, num_samples, batch_size):
         actual_batch_size = min(batch_size, num_samples - i)
+        batch_indices = list(range(i, i + actual_batch_size))
+
+        batch_data = build_batch_from_mmap(mm, batch_indices, sample_size)
 
         batch_x = array.array('f', [0.0] * (actual_batch_size * input_size))
         batch_y = array.array('f', [0.0] * (actual_batch_size * output_size))
 
         for j in range(actual_batch_size):
-            idx = i + j
-            offset = idx * sample_size
-            sample = test_data[offset : offset + sample_size]
-
-            batch_x[j*input_size : (j+1)*input_size] = sample[:input_size]
-            batch_y[j*output_size : (j+1)*output_size] = sample[input_size:]
+            start = j * sample_size
+            batch_x[j*input_size:(j+1)*input_size] = batch_data[start:start+input_size]
+            batch_y[j*output_size:(j+1)*output_size] = batch_data[start+input_size:start+sample_size]
 
         x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
         y = Tensor(batch_y, shape=(actual_batch_size, output_size))
@@ -121,44 +123,41 @@ def train():
     output_size = 10
     hidden1 = 128
     hidden2 = 64
-    num_samples = 60000
     batch_size = 32
+    num_epochs = 10
     sample_size = input_size + output_size
-    
+
     model = MLP(input_size, hidden1, hidden2, output_size)
     optimizer = SGD(model.parameters(), lr=0.01)
 
-    #train_data = load_bin_dataset('mnist_train.bin', num_samples, input_size)
-    train_data, num_samples = load_bin_dataset('mnist_train.bin', num_samples, sample_size)
+    mm, num_samples, _ = load_bin_dataset('mnist_train.bin', 60000, sample_size)
 
-    for epoch in range(10):
+    for epoch in range(num_epochs):
         total_loss = 0.0
         correct = 0.0
-        total = 0.0
+        total = 0
 
         indices = list(range(num_samples))
         random.shuffle(indices)
 
-        progress = tqdm(range(0, num_samples, batch_size), desc=f"Epoch {epoch+1}/10", dynamic_ncols=False)
+        progress = tqdm(range(0, num_samples, batch_size), desc=f"Epoch {epoch+1}/{num_epochs}", dynamic_ncols=False)
 
         for i in progress:
             batch_indices = indices[i:i+batch_size]
             actual_batch_size = len(batch_indices)
 
+            batch_data = build_batch_from_mmap(mm, batch_indices, sample_size)
+
             batch_x = array.array('f', [0.0] * (actual_batch_size * input_size))
             batch_y = array.array('f', [0.0] * (actual_batch_size * output_size))
 
-            for j, idx in enumerate(batch_indices):
-                offset = idx * sample_size
-                sample = train_data[offset : offset + sample_size]
-
-                batch_x[j*input_size : (j+1)*input_size] = sample[:input_size]
-                batch_y[j*output_size : (j+1)*output_size] = sample[input_size:]
-
+            for j in range(actual_batch_size):
+                start = j * sample_size
+                batch_x[j*input_size:(j+1)*input_size] = batch_data[start:start+input_size]
+                batch_y[j*output_size:(j+1)*output_size] = batch_data[start+input_size:start+sample_size]
 
             x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
             y = Tensor(batch_y, shape=(actual_batch_size, output_size))
-
 
             pred = model(x)
             loss = pred.cross_entropy(y)
@@ -166,7 +165,7 @@ def train():
             optimizer.step()
             optimizer.zero_grad()
 
-            # Break graph references
+            # Clear graph refs to avoid memory leak
             loss._prev.clear()
             pred._prev.clear()
             x._prev.clear()
@@ -175,7 +174,7 @@ def train():
             correct += accuracy(pred, y) * actual_batch_size
             total += actual_batch_size
 
-            if i % 25 == 0:
+            if i % (batch_size * 25) == 0:
                 progress.set_postfix({
                     "loss": total_loss / (total or 1),
                     "acc": f"{(correct / total) * 100:.2f}%"
@@ -186,22 +185,14 @@ def train():
     save_model(model, 'model.pkl')
     print("Model saved to model.pkl")
 
-#if __name__ == '__main__':
-#    if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
-#        convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
-#        convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
-#    else:
-#        print("Binary file already exists. Skipping conversion.")
-
-#    train()
-
 if __name__ == '__main__':
+    if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
+        convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
+        convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
+    else:
+        print("Binary file already exists. Skipping conversion.")
+
     with cProfile.Profile() as pr:
-        if not os.path.exists('mnist_train.bin') or not os.path.exists('mnist_test.bin'):
-            convert_csv_to_bin('mnist_train.csv', 'mnist_train.bin')
-            convert_csv_to_bin('mnist_test.csv', 'mnist_test.bin')
-        else:
-            print("Binary file already exists. Skipping conversion.")
         train()
 
     stats = pstats.Stats(pr)

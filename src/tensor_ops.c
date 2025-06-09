@@ -16,6 +16,13 @@
 #define VEC_SIZE 8
 #define MAX_CLASSES 512
 
+// matmul cache
+static float* cached_B_T = NULL;
+static size_t cached_B_T_size = 0;
+
+static float* cached_A_T = NULL;
+static size_t cached_A_T_size = 0;
+
 // Check for AVX2 support at runtime
 int has_avx2() {
     unsigned int eax, ebx, ecx, edx;
@@ -144,6 +151,21 @@ static inline __m256 exp256_ps(__m256 x) {
                     _mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23));
     
     return _mm256_mul_ps(result, pow2n);
+}
+
+// Utility to allocate or reuse aligned memory
+static float* get_cached_buffer(float** buf, size_t* current_size, size_t required_size) {
+    if (*current_size < required_size) {
+        if (*buf) _mm_free(*buf);
+        *buf = (float*)_mm_malloc(required_size * sizeof(float), 64);
+        if (!*buf) {
+            fprintf(stderr, "Error: Memory allocation failed\n");
+            *current_size = 0;
+            return NULL;
+        }
+        *current_size = required_size;
+    }
+    return *buf;
 }
 
 // Sanitize gradients by zeroing out non-finite values (NaN, Inf)
@@ -576,11 +598,17 @@ void tensor_add_grad(const float* dout, const float* a, const float* b, float* d
                 for (size_t j = 0; j < 8; j++) {
                     size_t idx = i + j*VEC_SIZE;
                     __m256 v_dout = _mm256_loadu_ps(dout + idx);
-                    __m256 v_da = _mm256_loadu_ps(da + idx);
-                    __m256 v_db = _mm256_loadu_ps(db + idx);
+
+                    // If da and db were zero-initialized:
+                    _mm256_storeu_ps(da + idx, v_dout);
+                    _mm256_storeu_ps(db + idx, v_dout);
+                
+                    // __m256 v_dout = _mm256_loadu_ps(dout + idx);
+                    // __m256 v_da = _mm256_loadu_ps(da + idx);
+                    // __m256 v_db = _mm256_loadu_ps(db + idx);
                     
-                    _mm256_storeu_ps(da + idx, _mm256_add_ps(v_da, v_dout));
-                    _mm256_storeu_ps(db + idx, _mm256_add_ps(v_db, v_dout));
+                    // _mm256_storeu_ps(da + idx, _mm256_add_ps(v_da, v_dout));
+                    // _mm256_storeu_ps(db + idx, _mm256_add_ps(v_db, v_dout));
                 }
             } else {
                 // Handle tail elements
@@ -589,7 +617,7 @@ void tensor_add_grad(const float* dout, const float* a, const float* b, float* d
                         __m256 v_dout = _mm256_loadu_ps(dout + j);
                         _mm256_storeu_ps(da + j, _mm256_add_ps(_mm256_loadu_ps(da + j), v_dout));
                         _mm256_storeu_ps(db + j, _mm256_add_ps(_mm256_loadu_ps(db + j), v_dout));
-                        j += VEC_SIZE - 1;
+                        // j += VEC_SIZE - 1;
                     } else {
                         da[j] += dout[j];
                         db[j] += dout[j];
@@ -1034,6 +1062,19 @@ void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, con
     }
 }
 
+void tensor_matmul_free_cache() {
+    if (cached_B_T) {
+        _mm_free(cached_B_T);
+        cached_B_T = NULL;
+        cached_B_T_size = 0;
+    }
+    if (cached_A_T) {
+        _mm_free(cached_A_T);
+        cached_A_T = NULL;
+        cached_A_T_size = 0;
+    }
+}
+
 void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, float* __restrict C,
                          size_t batch, size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
@@ -1063,7 +1104,9 @@ void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, f
     }
 
     // Allocate and transpose B once
-    float* __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
+    // * __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
+    float* __restrict B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
+    if (!B_T) return;
     if (!B_T) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         return;
@@ -1094,7 +1137,13 @@ void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, f
                     sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
                 }
 
-                float sum = hsum_avx(sum_vec);
+                //float sum = hsum_avx(sum_vec);
+
+                __attribute__((aligned(32))) float temp[8];
+                _mm256_store_ps(temp, sum_vec);
+                float sum = temp[0] + temp[1] + temp[2] + temp[3] +
+                            temp[4] + temp[5] + temp[6] + temp[7];
+
 
                 for (; k < K; ++k) {
                     sum += A_b[i * K + k] * B_T[j * K + k];
@@ -1104,16 +1153,19 @@ void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, f
             }
         }
     }
-
-    _mm_free(B_T);
+    atexit(tensor_matmul_free_cache);
 }
 
 void tensor_matmul_backward(const float* A, const float* B, const float* grad_out,
                             float* grad_A, float* grad_B,
                             size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
     // B_T and A_T are reused inside
-    float* B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
-    float* A_T = (float*)_mm_malloc(M * K * sizeof(float), 64);
+    // float* B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
+    // float* A_T = (float*)_mm_malloc(M * K * sizeof(float), 64);
+
+    float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
+    float* A_T = get_cached_buffer(&cached_A_T, &cached_A_T_size, M * K);
+    if (!B_T || !A_T) return;
 
     // Transpose B: [K x N] -> [N x K]
     #pragma omp parallel for
@@ -1159,8 +1211,8 @@ void tensor_matmul_backward(const float* A, const float* B, const float* grad_ou
             }
         }
     }
-
-    // Compute grad_B = A^T @ grad_out
+    
+    // Compute grad_B = A^T @ grad_out (optimized, avoid A_T)
     #pragma omp parallel for collapse(2)
     for (size_t b = 0; b < batch; ++b) {
         for (size_t i = 0; i < K; ++i) {
@@ -1168,31 +1220,23 @@ void tensor_matmul_backward(const float* A, const float* B, const float* grad_ou
                 __m256 vsum = _mm256_setzero_ps();
                 size_t k = 0;
                 for (; k + 7 < M; k += 8) {
-                    // Load 8 floats from A_T (row i)
-                    __m256 vA_T = _mm256_loadu_ps(&A_T[i * M + k]);
-                    // Load 8 floats from grad_out (row k)
-                    float go_buf[8] = {
-                        grad_out[b * M * N + (k+0) * N + j],
-                        grad_out[b * M * N + (k+1) * N + j],
-                        grad_out[b * M * N + (k+2) * N + j],
-                        grad_out[b * M * N + (k+3) * N + j],
-                        grad_out[b * M * N + (k+4) * N + j],
-                        grad_out[b * M * N + (k+5) * N + j],
-                        grad_out[b * M * N + (k+6) * N + j],
-                        grad_out[b * M * N + (k+7) * N + j],
-                    };
-                    __m256 vgrad_out = _mm256_loadu_ps(go_buf);
-                    vsum = _mm256_fmadd_ps(vA_T, vgrad_out, vsum);
+                    float buf_a[8], buf_g[8];
+                    for (int x = 0; x < 8; ++x) {
+                        buf_a[x] = A[b * M * K + (k + x) * K + i];         // A[b][k+x][i]
+                        buf_g[x] = grad_out[b * M * N + (k + x) * N + j];  // grad_out[b][k+x][j]
+                    }
+                    __m256 va = _mm256_loadu_ps(buf_a);
+                    __m256 vg = _mm256_loadu_ps(buf_g);
+                    vsum = _mm256_fmadd_ps(va, vg, vsum);
                 }
-                // Horizontal sum
+
                 float sum = 0.f;
                 float buf[8];
                 _mm256_storeu_ps(buf, vsum);
                 for (int x = 0; x < 8; ++x) sum += buf[x];
 
-                // Handle leftover M elements
                 for (; k < M; ++k) {
-                    sum += A_T[i * M + k] * grad_out[b * M * N + k * N + j];
+                    sum += A[b * M * K + k * K + i] * grad_out[b * M * N + k * N + j];
                 }
 
                 if (accumulate)
@@ -1202,9 +1246,7 @@ void tensor_matmul_backward(const float* A, const float* B, const float* grad_ou
             }
         }
     }
-
-    _mm_free(B_T);
-    _mm_free(A_T);
+    atexit(tensor_matmul_free_cache);
 }
 
 // Reductions

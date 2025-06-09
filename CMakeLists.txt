@@ -3,24 +3,26 @@ project(simd_tensor_backend C)
 
 set(CMAKE_C_STANDARD 11)
 
-# Create build/lib if it doesn't exist
+# Set output path
 set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/build)
 
-# Find OpenMP package
-find_package(OpenMP)
+# Find OpenMP
+find_package(OpenMP REQUIRED)
 
-# Source files
+# Gather source files
 file(GLOB SOURCES "src/*.c")
 
+# Define the shared library
 add_library(simd_tensor_backend SHARED ${SOURCES})
 
-# Include directories
+# Include headers
 target_include_directories(simd_tensor_backend PUBLIC 
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Enable AVX2, FMA, and optimization flags
+# Compiler optimizations and warnings
 target_compile_options(simd_tensor_backend PRIVATE 
+    -Wno-unused-parameter
     -mavx2 
     -mfma 
     -O3
@@ -28,13 +30,8 @@ target_compile_options(simd_tensor_backend PRIVATE
     -Wextra
 )
 
-# Link with math library and OpenMP if available
-target_link_libraries(simd_tensor_backend PRIVATE m)
-
-if(OpenMP_C_FOUND)
-    target_compile_options(simd_tensor_backend PRIVATE ${OpenMP_C_FLAGS})
-    target_link_libraries(simd_tensor_backend PRIVATE ${OpenMP_C_LIBRARIES})
-endif()
+# Link system math and OpenMP
+target_link_libraries(simd_tensor_backend PRIVATE m OpenMP::OpenMP_C)
 
 # Install targets
 install(TARGETS simd_tensor_backend

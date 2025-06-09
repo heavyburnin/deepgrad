@@ -1,7 +1,6 @@
 import ctypes
 import os
 import array
-import math
 from functools import lru_cache
 
 # Set up C library interface
@@ -14,6 +13,7 @@ c_float = ctypes.c_float
 c_size_t = ctypes.c_size_t
 c_bool = ctypes.c_bool
 c_int = ctypes.c_int
+
 # Define function signatures
 function_signatures = {
     'tensor_ops_init': ([], c_int),
@@ -82,7 +82,13 @@ class Tensor:
         else:
             self.shape = (len(self.data),)
             
-        expected_size = math.prod(self.shape) if self.shape else 1
+        expected_size = 1
+        if self.shape:
+            for dim in self.shape:
+                expected_size *= dim
+        else:
+            expected_size = 1
+
         assert len(self.data) == expected_size, f"Shape {self.shape} incompatible with data length {len(self.data)}"
 
     def backward(self):
@@ -186,7 +192,6 @@ class Tensor:
     
     @staticmethod
     def _broadcast_data(data, from_shape, to_shape):
-        """Broadcast data from one shape to another using C acceleration when possible."""
         if from_shape == to_shape:
             return data[:]
 
@@ -216,7 +221,10 @@ class Tensor:
 
         # Scalar to any shape
         if from_shape == (1,):
-            return data * math.prod(to_shape)
+            size = 1
+            for dim in to_shape:
+                size *= dim
+            return data * size
 
         raise NotImplementedError(f"Unsupported broadcast from {from_shape} to {to_shape}")
 
@@ -279,7 +287,9 @@ class Tensor:
         b_broadcasted = self._broadcast_data(other.data, other.shape, out_shape)
 
         # Prepare output buffer
-        out_size = math.prod(out_shape)
+        out_size = 1
+        for dim in out_shape:
+            out_size *= dim
         out_data = array.array('f', [0.0] * out_size)
         
         getattr(lib, op_name)(
@@ -303,7 +313,7 @@ class Tensor:
                 if self.requires_grad or other.requires_grad:
                     self_grad = array.array('f', [0.0] * len(a_broadcasted))
                     other_grad = array.array('f', [0.0] * len(b_broadcasted))
-                    getattr(lib, grad_fn_name + '_grad')(
+                    getattr(lib, grad_fn_name)(
                         (c_float * len(out_grad)).from_buffer(out_grad),
                         (c_float * len(a_broadcasted)).from_buffer(a_broadcasted),
                         (c_float * len(b_broadcasted)).from_buffer(b_broadcasted),
@@ -337,25 +347,25 @@ class Tensor:
         return out
 
     def __add__(self, other):
-        return self._apply_op(other, 'tensor_add', 'tensor_add')
+        return self._apply_op(other, 'tensor_add', 'tensor_add_grad')
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __sub__(self, other):
-        return self._apply_op(other, 'tensor_sub', 'tensor_sub')
+        return self._apply_op(other, 'tensor_sub', 'tensor_sub_grad')
 
     def __rsub__(self, other):
         return Tensor(other, requires_grad=False).__sub__(self)
 
     def __mul__(self, other):
-        return self._apply_op(other, 'tensor_mul', 'tensor_mul')
+        return self._apply_op(other, 'tensor_mul', 'tensor_mul_grad')
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __truediv__(self, other):
-        return self._apply_op(other, 'tensor_div', 'tensor_div')
+        return self._apply_op(other, 'tensor_div', 'tensor_div_grad')
 
     def __rtruediv__(self, other):
         return Tensor(other, requires_grad=False).__truediv__(self)
@@ -420,12 +430,9 @@ class Tensor:
             
             if out.requires_grad:
                 def _backward():
-                    if out.grad is None or not any(out.grad):
+                    #if out.grad is None or not any(out.grad):
+                    if out.grad is None:
                         return
-
-                    # Ensure grads are in array format for from_buffer
-                    if self.requires_grad and isinstance(self.grad, list):
-                        self.grad = array.array('f', self.grad)
 
                     if other.requires_grad and isinstance(other.grad, list):
                         other.grad = array.array('f', other.grad)
@@ -435,8 +442,8 @@ class Tensor:
                     grad_B_ptr = (c_float * len(other.grad)).from_buffer(other.grad) if other.requires_grad else None
 
                     lib.tensor_matmul_backward(
-                        (c_float * len(self.data)).from_buffer(self.data),
-                        (c_float * len(other.data)).from_buffer(other.data),
+                        self._cdata,
+                        other._cdata,
                         grad_out_c,
                         grad_A_ptr,
                         grad_B_ptr,
@@ -446,69 +453,6 @@ class Tensor:
                         other.shape[1], # N
                         True            # accumulate
                     )
-
-                out._backward = _backward
-                out._prev = [self, other]
-
-            return out
-
-        # Case: [B, M, K] @ [B, K, N] => [B, M, N]
-        elif len(s1) == 3 and len(s2) == 3:
-            B1, M, K1 = s1
-            B2, K2, N = s2
-            assert B1 == B2 and K1 == K2, f"Incompatible batched matmul shapes {s1} and {s2}"
-
-            out_data = array.array('f', [0.0] * (B1 * M * N))
-
-            lib.tensor_matmul_batch(
-                self._cdata,
-                other._cdata,
-                (c_float * len(out_data)).from_buffer(out_data),
-                B1, M, K1, N
-            )
-
-            out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(B1, M, N))
-
-            if out.requires_grad:
-                def _backward():
-                    if out.grad is None or not any(out.grad):
-                        return
-
-                    grad_out_c = (c_float * len(out.grad)).from_buffer(out.grad)
-
-                    if self.requires_grad and other.requires_grad:
-                        lib.tensor_matmul_backward(
-                            self._cdata,
-                            other._cdata,
-                            grad_out_c,
-                            self._grad_cdata,  # assume points to self.grad
-                            other._grad_cdata,
-                            B1, M, K1, N,
-                            True
-                        )
-
-                    elif self.requires_grad:
-                        lib.tensor_matmul_backward(
-                            self._cdata,
-                            other._cdata,
-                            grad_out_c,
-                            self._grad_cdata,
-                            None,
-                            B1, M, K1, N,
-                            True
-                        )
-
-                    elif other.requires_grad:
-                        lib.tensor_matmul_backward(
-                            self._cdata,
-                            other._cdata,
-                            grad_out_c,
-                            None,
-                            other._grad_cdata,
-                            B1, M, K1, N,
-                            True
-                        )
-
 
                 out._backward = _backward
                 out._prev = [self, other]
@@ -545,7 +489,8 @@ class Tensor:
                         (c_float * len(probs.data)).from_buffer(probs.data),
                         (c_float * len(target.data)).from_buffer(target.data),
                         (c_float * len(self.grad)).from_buffer(self.grad),
-                        B, C
+                        B, 
+                        C
                     )
 
             loss._backward = _backward

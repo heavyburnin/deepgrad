@@ -16,7 +16,7 @@
 #define VEC_SIZE 8
 #define MAX_CLASSES 512
 
-// matmul cache
+// gemmm cache
 static float* cached_B_T = NULL;
 static size_t cached_B_T_size = 0;
 
@@ -263,166 +263,19 @@ void tensor_fill_inplace(float* data, float value, size_t size) {
     }
 }
 
-// Unified tensor transpose function that handles different dimensions
-void tensor_transpose(const float* input, float* output, size_t ndim, size_t B, size_t M, size_t N) {
-    if (!input || !output) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_transpose\n");
-        return;
-    }
-    
-    // Handle different dimensions
-    if (ndim == 1) {
-        // 1D case: just copy the data (vector to column vector is handled in Python)
-        memcpy(output, input, N * sizeof(float));
-        return;
-    } 
-    else if (ndim == 2) {
-        // 2D case: matrix transpose
-        // For small matrices, use a simple transpose
-        if (M * N <= 64) {
-            for (size_t i = 0; i < M; i++) {
-                for (size_t j = 0; j < N; j++) {
-                    output[j * M + i] = input[i * N + j];
-                }
-            }
-            return;
-        }
-        
-        // Cache-friendly blocked approach with SIMD
-        const size_t block_size = 16; // Larger block size for better cache utilization
-        
-        #pragma omp parallel for collapse(2) if(M*N > 10000)
-        for (size_t i = 0; i < M; i += block_size) {
-            for (size_t j = 0; j < N; j += block_size) {
-                // Determine block dimensions (handle edge cases)
-                size_t block_M = (i + block_size > M) ? (M - i) : block_size;
-                size_t block_N = (j + block_size > N) ? (N - j) : block_size;
-                
-                // Process 8x8 sub-blocks with SIMD when possible
-                for (size_t bi = 0; bi < block_M; bi += 8) {
-                    for (size_t bj = 0; bj < block_N; bj += 8) {
-                        // Check if we have a full 8x8 sub-block
-                        if (bi + 8 <= block_M && bj + 8 <= block_N) {
-                            // Load 8x8 block with prefetching
-                            _mm_prefetch(&input[(i+bi+8)*N + j+bj], _MM_HINT_T0);
-                            
-                            __m256 row0 = _mm256_loadu_ps(&input[(i+bi+0)*N + j+bj]);
-                            __m256 row1 = _mm256_loadu_ps(&input[(i+bi+1)*N + j+bj]);
-                            __m256 row2 = _mm256_loadu_ps(&input[(i+bi+2)*N + j+bj]);
-                            __m256 row3 = _mm256_loadu_ps(&input[(i+bi+3)*N + j+bj]);
-                            __m256 row4 = _mm256_loadu_ps(&input[(i+bi+4)*N + j+bj]);
-                            __m256 row5 = _mm256_loadu_ps(&input[(i+bi+5)*N + j+bj]);
-                            __m256 row6 = _mm256_loadu_ps(&input[(i+bi+6)*N + j+bj]);
-                            __m256 row7 = _mm256_loadu_ps(&input[(i+bi+7)*N + j+bj]);
-                            
-                            // Transpose 8x8 block using AVX2 intrinsics
-                            __m256 t0, t1, t2, t3, t4, t5, t6, t7;
-                            
-                            // Interleave 32-bit elements
-                            t0 = _mm256_unpacklo_ps(row0, row1);
-                            t1 = _mm256_unpackhi_ps(row0, row1);
-                            t2 = _mm256_unpacklo_ps(row2, row3);
-                            t3 = _mm256_unpackhi_ps(row2, row3);
-                            t4 = _mm256_unpacklo_ps(row4, row5);
-                            t5 = _mm256_unpackhi_ps(row4, row5);
-                            t6 = _mm256_unpacklo_ps(row6, row7);
-                            t7 = _mm256_unpackhi_ps(row6, row7);
-                            
-                            // Interleave 64-bit elements
-                            row0 = _mm256_shuffle_ps(t0, t2, 0x44);
-                            row1 = _mm256_shuffle_ps(t0, t2, 0xEE);
-                            row2 = _mm256_shuffle_ps(t1, t3, 0x44);
-                            row3 = _mm256_shuffle_ps(t1, t3, 0xEE);
-                            row4 = _mm256_shuffle_ps(t4, t6, 0x44);
-                            row5 = _mm256_shuffle_ps(t4, t6, 0xEE);
-                            row6 = _mm256_shuffle_ps(t5, t7, 0x44);
-                            row7 = _mm256_shuffle_ps(t5, t7, 0xEE);
-                            
-                            // Interleave 128-bit elements
-                            t0 = _mm256_permute2f128_ps(row0, row4, 0x20);
-                            t1 = _mm256_permute2f128_ps(row1, row5, 0x20);
-                            t2 = _mm256_permute2f128_ps(row2, row6, 0x20);
-                            t3 = _mm256_permute2f128_ps(row3, row7, 0x20);
-                            t4 = _mm256_permute2f128_ps(row0, row4, 0x31);
-                            t5 = _mm256_permute2f128_ps(row1, row5, 0x31);
-                            t6 = _mm256_permute2f128_ps(row2, row6, 0x31);
-                            t7 = _mm256_permute2f128_ps(row3, row7, 0x31);
-                            
-                            // Store transposed 8x8 block
-                            _mm256_storeu_ps(&output[(j+bj+0)*M + i+bi], t0);
-                            _mm256_storeu_ps(&output[(j+bj+1)*M + i+bi], t1);
-                            _mm256_storeu_ps(&output[(j+bj+2)*M + i+bi], t2);
-                            _mm256_storeu_ps(&output[(j+bj+3)*M + i+bi], t3);
-                            _mm256_storeu_ps(&output[(j+bj+4)*M + i+bi], t4);
-                            _mm256_storeu_ps(&output[(j+bj+5)*M + i+bi], t5);
-                            _mm256_storeu_ps(&output[(j+bj+6)*M + i+bi], t6);
-                            _mm256_storeu_ps(&output[(j+bj+7)*M + i+bi], t7);
-                        } else {
-                            // Fallback for partial sub-blocks
-                            size_t max_bi = (bi + 8 > block_M) ? block_M - bi : 8;
-                            size_t max_bj = (bj + 8 > block_N) ? block_N - bj : 8;
-                            
-                            for (size_t ii = 0; ii < max_bi; ii++) {
-                                for (size_t jj = 0; jj < max_bj; jj++) {
-                                    output[(j + bj + jj) * M + (i + bi + ii)] = 
-                                        input[(i + bi + ii) * N + (j + bj + jj)];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } 
-    else if (ndim == 3) {
-        // 3D case: batch matrix transpose
-        size_t matrix_size = M * N;
-        
-        #pragma omp parallel for if(B > 4)
-        for (size_t b = 0; b < B; b++) {
-            // Use direct transpose for each batch instead of recursive call
-            const float* input_matrix = input + b * matrix_size;
-            float* output_matrix = output + b * matrix_size;
-            
-            // For small matrices, use a simple transpose
-            if (M * N <= 64) {
-                for (size_t i = 0; i < M; i++) {
-                    for (size_t j = 0; j < N; j++) {
-                        output_matrix[j * M + i] = input_matrix[i * N + j];
-                    }
-                }
-                continue;
-            }
-            
-            // Use the same blocked approach as in the 2D case
-            const size_t block_size = 16;
-            
-            for (size_t i = 0; i < M; i += block_size) {
-                for (size_t j = 0; j < N; j += block_size) {
-                    // Same block processing as in 2D case
-                    // ... (identical code to the 2D case block processing)
-                    size_t block_M = (i + block_size > M) ? (M - i) : block_size;
-                    size_t block_N = (j + block_size > N) ? (N - j) : block_size;
-                    
-                    for (size_t bi = 0; bi < block_M; bi++) {
-                        for (size_t bj = 0; bj < block_N; bj++) {
-                            output_matrix[(j + bj) * M + (i + bi)] = 
-                                input_matrix[(i + bi) * N + (j + bj)];
-                        }
-                    }
-                }
-            }
-        }
-    } 
-    else {
-        fprintf(stderr, "Error: Unsupported number of dimensions (%zu) in tensor_transpose\n", ndim);
-    }
-}
+void zero_float_array(float *data, size_t size) {
+    size_t i = 0;
+    __m256 zero = _mm256_setzero_ps();  // 8 floats = 256 bits
 
-void tensor_transpose_batch(const float* input, float* output, 
-                         size_t ndim, size_t B, size_t M, size_t N) {
-    // Remove redundant parallel region - already handled in tensor_transpose
-    tensor_transpose(input, output, ndim, B, M, N);
+    // Zero in chunks of 8 floats
+    for (; i + 8 <= size; i += 8) {
+        _mm256_storeu_ps(&data[i], zero);
+    }
+
+    // Handle the remaining tail (if not a multiple of 8)
+    for (; i < size; ++i) {
+        data[i] = 0.0f;
+    }
 }
 
 // Efficient broadcasting of a single row [1, N] → [B, N]
@@ -541,267 +394,203 @@ void tensor_unbroadcast_sum_axes(
     }
 }
 
-void tensor_add(const float* a, const float* b, float* out, size_t n) {
+void tensor_add(const float* a, const float* b, float* out, size_t n, size_t batch_size) {
     if (!a || !b || !out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_add\n");
+        fprintf(stderr, "Error: NULL pointer passed to tensor_add_batch\n");
         return;
     }
-    
-    // Align to cache line boundary for better performance
-    const size_t CHUNK_SIZE = 16 * VEC_SIZE; // 16 vectors = 512 bytes with AVX2
-    
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < n; i += CHUNK_SIZE) {
-            if (i + CHUNK_SIZE <= n) {
-                // Prefetch two chunks ahead
-                _mm_prefetch(a + i + 2*CHUNK_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 2*CHUNK_SIZE, _MM_HINT_T0);
-                
-                // Unroll 16 vectors for maximum instruction-level parallelism
-                for (size_t j = 0; j < 16; j++) {
-                    __m256 va = _mm256_loadu_ps(a + i + j*VEC_SIZE);
-                    __m256 vb = _mm256_loadu_ps(b + i + j*VEC_SIZE);
-                    _mm256_storeu_ps(out + i + j*VEC_SIZE, _mm256_add_ps(va, vb));
-                }
-            } else {
-                // Handle tail with minimal branching
-                size_t j = i;
-                for (; j + VEC_SIZE <= n; j += VEC_SIZE) {
-                    _mm256_storeu_ps(out + j, _mm256_add_ps(_mm256_loadu_ps(a + j), _mm256_loadu_ps(b + j)));
-                }
-                for (; j < n; j++) {
-                    out[j] = a[j] + b[j];
-                }
-            }
-        }
+
+    // Total number of elements across all batches
+    const size_t total_elements = batch_size * n;
+    const size_t vec_end = total_elements - (total_elements % 8);
+
+    // Parallelize over batches and elements
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_add_ps(va, vb));
+    }
+
+    // Handle remaining elements (if total_elements is not divisible by 8)
+    for (size_t i = vec_end; i < total_elements; i++) {
+        out[i] = a[i] + b[i];
     }
 }
 
-void tensor_add_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n) {
-    // Align to cache line boundary for better performance
-    const size_t CHUNK_SIZE = 8 * VEC_SIZE; // 8 vectors = 256 bytes with AVX2
-    const size_t aligned_n = n - (n % VEC_SIZE);
-    
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < n; i += CHUNK_SIZE) {
-            if (i + CHUNK_SIZE <= aligned_n) {
-                // Prefetch ahead
-                _mm_prefetch(dout + i + 2*CHUNK_SIZE, _MM_HINT_T0);
-                _mm_prefetch(da + i + 2*CHUNK_SIZE, _MM_HINT_T0);
-                _mm_prefetch(db + i + 2*CHUNK_SIZE, _MM_HINT_T0);
-                
-                // Process 8 vectors at once with explicit loading to help compiler optimize
-                for (size_t j = 0; j < 8; j++) {
-                    size_t idx = i + j*VEC_SIZE;
-                    __m256 v_dout = _mm256_loadu_ps(dout + idx);
-
-                    // If da and db were zero-initialized:
-                    _mm256_storeu_ps(da + idx, v_dout);
-                    _mm256_storeu_ps(db + idx, v_dout);
-                
-                    // __m256 v_dout = _mm256_loadu_ps(dout + idx);
-                    // __m256 v_da = _mm256_loadu_ps(da + idx);
-                    // __m256 v_db = _mm256_loadu_ps(db + idx);
-                    
-                    // _mm256_storeu_ps(da + idx, _mm256_add_ps(v_da, v_dout));
-                    // _mm256_storeu_ps(db + idx, _mm256_add_ps(v_db, v_dout));
-                }
-            } else {
-                // Handle tail elements
-                for (size_t j = i; j < n; j++) {
-                    if (j + VEC_SIZE <= n) {
-                        __m256 v_dout = _mm256_loadu_ps(dout + j);
-                        _mm256_storeu_ps(da + j, _mm256_add_ps(_mm256_loadu_ps(da + j), v_dout));
-                        _mm256_storeu_ps(db + j, _mm256_add_ps(_mm256_loadu_ps(db + j), v_dout));
-                        // j += VEC_SIZE - 1;
-                    } else {
-                        da[j] += dout[j];
-                        db[j] += dout[j];
-                    }
-                }
-            }
-        }
-    }
-}
-
-void tensor_sub(const float* a, const float* b, float* out, size_t n) {
-    if (!a || !b || !out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_sub\n");
+void tensor_add_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n, size_t batch_size) {
+    if (!dout || !da || !db) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_add_grad_batch\n");
         return;
     }
-    
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            if (i + 4*VEC_SIZE <= n) {
-                // Prefetch next cache lines
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(out + i,             _mm256_sub_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_sub_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_sub_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-            } else {
-                // Handle remaining elements
-                for (size_t j = i; j < n; j++) {
-                    if (j + VEC_SIZE <= n && j % VEC_SIZE == 0) {
-                        __m256 va = _mm256_loadu_ps(a + j);
-                        __m256 vb = _mm256_loadu_ps(b + j);
-                        __m256 vout = _mm256_sub_ps(va, vb);
-                        _mm256_storeu_ps(out + j, vout);
-                        j += VEC_SIZE - 1;
-                    } else {
-                        out[j] = a[j] - b[j];
-                    }
-                }
-            }
-        }
+
+    // Total number of elements across all batches
+    const size_t total_elements = batch_size * n;
+    const size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 v_dout = _mm256_loadu_ps(dout + i);
+
+        __m256 v_da = _mm256_loadu_ps(da + i);
+        __m256 v_db = _mm256_loadu_ps(db + i);
+
+        _mm256_storeu_ps(da + i, _mm256_add_ps(v_da, v_dout));
+        _mm256_storeu_ps(db + i, _mm256_add_ps(v_db, v_dout));
+    }
+
+    // Handle remaining elements
+    for (size_t i = vec_end; i < total_elements; i++) {
+        da[i] += dout[i];
+        db[i] += dout[i];
     }
 }
 
-void tensor_sub_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n) {
-    size_t vec_size = n / VEC_SIZE * VEC_SIZE;
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < vec_size; i += VEC_SIZE) {
-            __m256 v_dout = _mm256_loadu_ps(dout + i);
-            _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_dout));
-            __m256 v_db = _mm256_sub_ps(_mm256_setzero_ps(), v_dout);
-            v_db = _mm256_add_ps(_mm256_loadu_ps(db + i), v_db);
-            _mm256_storeu_ps(db + i, v_db);
-        }
-        #pragma omp for
-        for (size_t i = vec_size; i < n; i++) {
-            da[i] += dout[i];
-            db[i] -= dout[i];
-        }
-    }
-}
-
-void tensor_mul(const float* a, const float* b, float* out, size_t n) {
+void tensor_sub(const float* a, const float* b, float* out, size_t n, size_t batch_size) {
     if (!a || !b || !out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_mul\n");
+        fprintf(stderr, "Error: NULL pointer passed to tensor_sub_batch\n");
         return;
     }
-    
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            if (i + 4*VEC_SIZE <= n) {
-                // Prefetch next cache lines
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(out + i,             _mm256_mul_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_mul_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_mul_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-            } else {
-                // Handle remaining elements
-                for (size_t j = i; j < n; j++) {
-                    if (j + VEC_SIZE <= n && j % VEC_SIZE == 0) {
-                        __m256 va = _mm256_loadu_ps(a + j);
-                        __m256 vb = _mm256_loadu_ps(b + j);
-                        __m256 vout = _mm256_mul_ps(va, vb);
-                        _mm256_storeu_ps(out + j, vout);
-                        j += VEC_SIZE - 1;
-                    } else {
-                        out[j] = a[j] * b[j];
-                    }
-                }
-            }
-        }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_sub_ps(va, vb));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        out[i] = a[i] - b[i];
     }
 }
 
-void tensor_mul_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n) {
-    size_t vec_size = n / VEC_SIZE * VEC_SIZE;
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < vec_size; i += VEC_SIZE) {
-            __m256 v_dout = _mm256_loadu_ps(dout + i);
-            __m256 v_a = _mm256_loadu_ps(a + i);
-            __m256 v_b = _mm256_loadu_ps(b + i);
-            __m256 v_da = _mm256_mul_ps(v_dout, v_b);
-            __m256 v_db = _mm256_mul_ps(v_dout, v_a);
-            _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_da));
-            _mm256_storeu_ps(db + i, _mm256_add_ps(_mm256_loadu_ps(db + i), v_db));
-        }
-        #pragma omp for
-        for (size_t i = vec_size; i < n; i++) {
-            da[i] += dout[i] * b[i];
-            db[i] += dout[i] * a[i];
-        }
-    }
-}
-
-void tensor_div(const float* a, const float* b, float* out, size_t n) {
-    if (!a || !b || !out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_div\n");
+void tensor_sub_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n, size_t batch_size) {
+    if (!dout || !da || !db) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_sub_grad_batch\n");
         return;
     }
-    
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < n; i += 4*VEC_SIZE) {
-            if (i + 4*VEC_SIZE <= n) {
-                // Prefetch next cache lines
-                _mm_prefetch(a + i + 4*VEC_SIZE, _MM_HINT_T0);
-                _mm_prefetch(b + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                _mm256_storeu_ps(out + i,             _mm256_div_ps(_mm256_loadu_ps(a + i),             _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(out + i + VEC_SIZE,   _mm256_div_ps(_mm256_loadu_ps(a + i + VEC_SIZE),   _mm256_loadu_ps(b + i + VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 2*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 2*VEC_SIZE), _mm256_loadu_ps(b + i + 2*VEC_SIZE)));
-                _mm256_storeu_ps(out + i + 3*VEC_SIZE, _mm256_div_ps(_mm256_loadu_ps(a + i + 3*VEC_SIZE), _mm256_loadu_ps(b + i + 3*VEC_SIZE)));
-            } else {
-                // Handle remaining elements
-                for (size_t j = i; j < n; j++) {
-                    if (j + VEC_SIZE <= n && j % VEC_SIZE == 0) {
-                        __m256 va = _mm256_loadu_ps(a + j);
-                        __m256 vb = _mm256_loadu_ps(b + j);
-                        __m256 vout = _mm256_div_ps(va, vb);
-                        _mm256_storeu_ps(out + j, vout);
-                        j += VEC_SIZE - 1;
-                    } else {
-                        out[j] = a[j] / b[j];
-                    }
-                }
-            }
-        }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 v_dout = _mm256_loadu_ps(dout + i);
+
+        __m256 v_da = _mm256_loadu_ps(da + i);
+        __m256 v_db = _mm256_loadu_ps(db + i);
+
+        _mm256_storeu_ps(da + i, _mm256_add_ps(v_da, v_dout));
+        _mm256_storeu_ps(db + i, _mm256_sub_ps(v_db, v_dout));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        da[i] += dout[i];
+        db[i] -= dout[i];
     }
 }
 
-void tensor_div_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n) {
-    size_t vec_size = n / VEC_SIZE * VEC_SIZE;
-    #pragma omp parallel if(n > 10000)
-    {
-        #pragma omp for
-        for (size_t i = 0; i < vec_size; i += VEC_SIZE) {
-            __m256 v_dout = _mm256_loadu_ps(dout + i);
-            __m256 v_a = _mm256_loadu_ps(a + i);
-            __m256 v_b = _mm256_loadu_ps(b + i);
-            __m256 v_da = _mm256_div_ps(v_dout, v_b);
-            __m256 v_db = _mm256_mul_ps(v_dout, v_a);
-            v_db = _mm256_div_ps(v_db, _mm256_mul_ps(v_b, v_b));
-            v_db = _mm256_sub_ps(_mm256_setzero_ps(), v_db);
-            _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_da));
-            _mm256_storeu_ps(db + i, _mm256_add_ps(_mm256_loadu_ps(db + i), v_db));
-        }
-        #pragma omp for
-        for (size_t i = vec_size; i < n; i++) {
-            da[i] += dout[i] / b[i];
-            db[i] -= dout[i] * a[i] / (b[i] * b[i]);
-        }
+void tensor_mul(const float* a, const float* b, float* out, size_t n, size_t batch_size) {
+    if (!a || !b || !out) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_mul_batch\n");
+        return;
+    }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_mul_ps(va, vb));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        out[i] = a[i] * b[i];
+    }
+}
+
+void tensor_mul_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n, size_t batch_size) {
+    if (!dout || !da || !db) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_mul_grad_batch\n");
+        return;
+    }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 v_dout = _mm256_loadu_ps(dout + i);
+        __m256 v_a = _mm256_loadu_ps(a + i);
+        __m256 v_b = _mm256_loadu_ps(b + i);
+
+        __m256 v_da = _mm256_mul_ps(v_dout, v_b);
+        __m256 v_db = _mm256_mul_ps(v_dout, v_a);
+
+        _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_da));
+        _mm256_storeu_ps(db + i, _mm256_add_ps(_mm256_loadu_ps(db + i), v_db));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        da[i] += dout[i] * b[i];
+        db[i] += dout[i] * a[i];
+    }
+}
+
+void tensor_div(const float* a, const float* b, float* out, size_t n, size_t batch_size) {
+    if (!a || !b || !out) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_div_batch\n");
+        return;
+    }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_div_ps(va, vb));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        out[i] = a[i] / b[i];
+    }
+}
+
+void tensor_div_grad(const float* dout, const float* a, const float* b, float* da, float* db, size_t n, size_t batch_size) {
+    if (!dout || !da || !db) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_div_grad_batch\n");
+        return;
+    }
+
+    size_t total_elements = batch_size * n;
+    size_t vec_end = total_elements - (total_elements % 8);
+
+    #pragma omp parallel for schedule(static) if (total_elements > 10000)
+    for (size_t i = 0; i < vec_end; i += 8) {
+        __m256 v_dout = _mm256_loadu_ps(dout + i);
+        __m256 v_a = _mm256_loadu_ps(a + i);
+        __m256 v_b = _mm256_loadu_ps(b + i);
+
+        __m256 v_da = _mm256_div_ps(v_dout, v_b);
+
+        __m256 v_db = _mm256_mul_ps(v_dout, v_a);
+        v_db = _mm256_div_ps(v_db, _mm256_mul_ps(v_b, v_b));
+        v_db = _mm256_sub_ps(_mm256_setzero_ps(), v_db);
+
+        _mm256_storeu_ps(da + i, _mm256_add_ps(_mm256_loadu_ps(da + i), v_da));
+        _mm256_storeu_ps(db + i, _mm256_add_ps(_mm256_loadu_ps(db + i), v_db));
+    }
+
+    for (size_t i = vec_end; i < total_elements; i++) {
+        da[i] += dout[i] / b[i];
+        db[i] -= dout[i] * a[i] / (b[i] * b[i]);
     }
 }
 
@@ -972,7 +761,7 @@ void tensor_softmax_cross_entropy(const float* logits,
     *loss_out = fabsf(loss); 
 }
 
-void tensor_softmax_ce_batch(const float* logits,
+void tensor_softmax_ce(const float* logits,
                                          const float* labels,
                                          float* losses,
                                          float* probs_out,
@@ -1075,7 +864,7 @@ void tensor_matmul_free_cache() {
     }
 }
 
-void tensor_matmul_batch(const float* __restrict A, const float* __restrict B, float* __restrict C,
+void tensor_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C,
                          size_t batch, size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_matmul_batch\n");
@@ -1255,49 +1044,35 @@ float tensor_sum(const float* input, size_t len) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_sum\n");
         return 0.0f;
     }
-    
+
     float total_sum = 0.0f;
-    
-    #pragma omp parallel reduction(+:total_sum) if(len > 100000)
+    size_t vec_end = len - (len % 8);
+
+    // Use OpenMP with private SIMD accumulators
+    #pragma omp parallel reduction(+:total_sum)
     {
-        #pragma omp single
-        {
-            size_t i = 0;
-            __m256 vsum1 = _mm256_setzero_ps();
-            __m256 vsum2 = _mm256_setzero_ps();
-            __m256 vsum3 = _mm256_setzero_ps();
-            __m256 vsum4 = _mm256_setzero_ps();
-            
-            // Process 32 elements at a time
-            for (; i + 4*VEC_SIZE <= len; i += 4*VEC_SIZE) {
-                _mm_prefetch(input + i + 4*VEC_SIZE, _MM_HINT_T0);
-                
-                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
-                vsum2 = _mm256_add_ps(vsum2, _mm256_loadu_ps(input + i + VEC_SIZE));
-                vsum3 = _mm256_add_ps(vsum3, _mm256_loadu_ps(input + i + 2*VEC_SIZE));
-                vsum4 = _mm256_add_ps(vsum4, _mm256_loadu_ps(input + i + 3*VEC_SIZE));
-            }
-            
-            // Combine the partial sums
-            vsum1 = _mm256_add_ps(vsum1, vsum2);
-            vsum3 = _mm256_add_ps(vsum3, vsum4);
-            vsum1 = _mm256_add_ps(vsum1, vsum3);
-            
-            // Process remaining blocks of 8
-            for (; i + VEC_SIZE <= len; i += VEC_SIZE) {
-                vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(input + i));
-            }
-            
-            // Horizontal sum
-            total_sum = hsum_avx(vsum1);
-            
-            // Process remaining elements
-            for (; i < len; i++) {
-                total_sum += input[i];
-            }
+        __m256 vsum = _mm256_setzero_ps();
+
+        #pragma omp for schedule(static) nowait
+        for (size_t i = 0; i < vec_end; i += 8) {
+            __m256 v = _mm256_loadu_ps(input + i);
+            vsum = _mm256_add_ps(vsum, v);
         }
+
+        // Reduce the SIMD register to scalar
+        float partial_sum = hsum_avx(vsum);
+
+        // Add thread-local partial sum to the global reduction
+        total_sum += partial_sum;
+
+        // Implicit barrier here due to reduction
     }
-    
+
+    // Handle remaining elements
+    for (size_t i = vec_end; i < len; i++) {
+        total_sum += input[i];
+    }
+
     return total_sum;
 }
 

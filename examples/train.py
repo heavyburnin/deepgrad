@@ -40,17 +40,15 @@ def load_bin_dataset(bin_path, num_samples, sample_size):
 
 def build_batch_from_mmap(mm, sample_indices, sample_size):
     sample_bytes = sample_size * 4
-    batch_bytes = bytearray(len(sample_indices) * sample_bytes)
-    mv = memoryview(batch_bytes)
-
-    for i, sample_idx in enumerate(sample_indices):
-        offset = sample_idx * sample_bytes
-        mv[i*sample_bytes:(i+1)*sample_bytes] = mm[offset:offset+sample_bytes]
-
     batch_array = array.array('f')
-    batch_array.frombytes(batch_bytes)
+
+    for sample_idx in sample_indices:
+        offset = sample_idx * sample_bytes
+        # Directly extend the array from mmap slice bytes
+        batch_array.frombytes(mm[offset : offset + sample_bytes])
+
     return batch_array
-        
+
 def save_model(model, filepath):
     with open(filepath, 'wb') as f:
         dill.dump(model, f)
@@ -60,10 +58,10 @@ def load_model(filepath):
         return dill.load(f)
 
 def accuracy(pred, target):
-    logits = list(pred.data)
+    logits = pred.data
     pred_class = [max(range(10), key=lambda i: logits[i + j * 10]) for j in range(len(logits) // 10)]
     true_class = [max(range(10), key=lambda i: target.data[i + j * 10]) for j in range(len(target.data) // 10)]
-    return sum([int(p == t) for p, t in zip(pred_class, true_class)]) / len(pred_class)
+    return sum(int(p == t) for p, t in zip(pred_class, true_class)) / len(pred_class)
 
 def evaluate(model, test_path='mnist_test.bin'):
     input_size = 784
@@ -180,7 +178,8 @@ def train():
                     "acc": f"{(correct / total) * 100:.2f}%"
                 })
 
-        evaluate(model)
+        if epoch == num_epochs - 1:
+            evaluate(model)
 
     save_model(model, 'model.pkl')
     print("Model saved to model.pkl")

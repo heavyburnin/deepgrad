@@ -20,9 +20,6 @@
 static float* cached_B_T = NULL;
 static size_t cached_B_T_size = 0;
 
-static float* cached_A_T = NULL;
-static size_t cached_A_T_size = 0;
-
 // Check for AVX2 support at runtime
 int has_avx2() {
     unsigned int eax, ebx, ecx, edx;
@@ -857,17 +854,12 @@ void tensor_matmul_free_cache() {
         cached_B_T = NULL;
         cached_B_T_size = 0;
     }
-    if (cached_A_T) {
-        _mm_free(cached_A_T);
-        cached_A_T = NULL;
-        cached_A_T_size = 0;
-    }
 }
 
 void tensor_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C,
                          size_t batch, size_t M, size_t K, size_t N) {
     if (!A || !B || !C) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul_batch\n");
+        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul\n");
         return;
     }
 
@@ -893,9 +885,8 @@ void tensor_matmul(const float* __restrict A, const float* __restrict B, float* 
     }
 
     // Allocate and transpose B once
-    // * __restrict B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
     float* __restrict B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
-    if (!B_T) return;
+    
     if (!B_T) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         return;
@@ -948,25 +939,14 @@ void tensor_matmul(const float* __restrict A, const float* __restrict B, float* 
 void tensor_matmul_backward(const float* A, const float* B, const float* grad_out,
                             float* grad_A, float* grad_B,
                             size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
-    // B_T and A_T are reused inside
-    // float* B_T = (float*)_mm_malloc(K * N * sizeof(float), 64);
-    // float* A_T = (float*)_mm_malloc(M * K * sizeof(float), 64);
-
     float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
-    float* A_T = get_cached_buffer(&cached_A_T, &cached_A_T_size, M * K);
-    if (!B_T || !A_T) return;
+    if (!B_T) return;
 
     // Transpose B: [K x N] -> [N x K]
     #pragma omp parallel for
     for (size_t k = 0; k < K; ++k)
         for (size_t n = 0; n < N; ++n)
             B_T[n * K + k] = B[k * N + n];
-
-    // Transpose A: [M x K] -> [K x M]
-    #pragma omp parallel for
-    for (size_t m = 0; m < M; ++m)
-        for (size_t k = 0; k < K; ++k)
-            A_T[k * M + m] = A[m * K + k];
 
     // Compute grad_A = grad_out @ B^T
     #pragma omp parallel for collapse(2)
@@ -1001,7 +981,6 @@ void tensor_matmul_backward(const float* A, const float* B, const float* grad_ou
         }
     }
     
-    // Compute grad_B = A^T @ grad_out (optimized, avoid A_T)
     #pragma omp parallel for collapse(2)
     for (size_t b = 0; b < batch; ++b) {
         for (size_t i = 0; i < K; ++i) {
@@ -1037,7 +1016,7 @@ void tensor_matmul_backward(const float* A, const float* B, const float* grad_ou
     }
     atexit(tensor_matmul_free_cache);
 }
-
+    
 // Reductions
 float tensor_sum(const float* input, size_t len) {
     if (!input) {

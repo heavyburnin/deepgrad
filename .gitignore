@@ -6,3 +6,5 @@ venv
 examples/__pycache__
 build/
 model.pkl
+examples/tensor.py.bak
+examples/tensor_stock.py

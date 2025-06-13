@@ -34,12 +34,11 @@ function_signatures = {
     'tensor_relu': ([c_float_p, c_float_p, c_size_t], None),
     'tensor_relu_backward': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
 
-    'tensor_matmul': ([c_float_p, c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t], None),
-    'tensor_matmul_backward': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t,
-                                 c_size_t, c_size_t, c_size_t, c_bool], None),
-
-    'tensor_softmax_ce': ([c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None),
-    'tensor_softmax_ce_backward': ([c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None),
+    'tensor_matmul': ( [c_int, c_float_p, c_float_p, c_float_p, c_float_p,
+                        c_float_p, c_size_t, c_size_t, c_size_t,c_size_t, c_bool], None),
+ 
+    'tensor_softmax_ce': ([c_float_p, c_float_p, c_float_p, c_float_p,
+                           c_float_p, c_float_p, c_size_t, c_size_t], None),
 
     'tensor_sum': ([c_float_p, c_size_t], c_float),
     'tensor_mean': ([c_float_p, c_size_t], c_float),
@@ -129,8 +128,8 @@ class Tensor:
         for t in reversed(topo):
             if t._backward is not None:
                 t._backward()
-            if t.grad is not None:
-                t.sanitize_gradients()
+            #if t.grad is not None:
+               # t.sanitize_gradients()
 
         def _compute_strides(shape):
             strides = [1] * len(shape)
@@ -205,7 +204,7 @@ class Tensor:
             # Case: [1, N] -> [B, N]  (row repeat)
             if from_shape[0] == 1 and from_shape[1] == to_shape[1]:
                 B, N = to_shape
-                result = get_buffer(B * N)
+                result = array.array('f', [0.0] * (B * N))
                 lib.tensor_broadcast_row(
                     (c_float * len(data)).from_buffer(data),
                     (c_float * len(result)).from_buffer(result),
@@ -416,45 +415,56 @@ class Tensor:
     def matmul(self, other):
         assert isinstance(other, Tensor), "Operand must be a Tensor"
         s1, s2 = self.shape, other.shape
-
-        # Case: [B, M] @ [M, N] => [B, N]
         if len(s1) == 2 and len(s2) == 2:
-            B, M = s1
-            M2, N = s2
-            assert M == M2, f"Incompatible matmul shapes {s1} and {s2}"
-
-            out_data = get_buffer(B * N)
+            M, K = s1
+            K2, N = s2
+            assert K == K2, f"Incompatible matmul shapes {s1} and {s2}"
+        
+            out_data = get_buffer(M * N)
 
             lib.tensor_matmul(
+                0,  # MATMUL_FORWARD
                 (c_float * len(self.data)).from_buffer(self.data),
                 (c_float * len(other.data)).from_buffer(other.data),
+                None,
                 (c_float * len(out_data)).from_buffer(out_data),
-                B, 1, M, N
+                None,
+                1,  # batch = 1
+                M, K, N,
+                False
             )
-
-            out = Tensor(array.array('f', out_data), requires_grad=self.requires_grad or other.requires_grad, shape=(B, N))
             
+            out = Tensor(array.array('f', out_data), requires_grad=self.requires_grad or other.requires_grad, shape=(M, N))
+                
             if out.requires_grad:
                 def _backward():
-                    #if out.grad is None or not any(out.grad):
                     if out.grad is None:
                         return
+                    
+                    # Ensure gradient buffers are allocated and zeroed
+                    if self.requires_grad and self.grad is None:
+                        self.grad = get_buffer(len(self.data))
+                        lib.zero_float_array((c_float * len(self.grad)).from_buffer(self.grad), len(self.grad))
 
-                    grad_out_c = (c_float * len(out.grad)).from_buffer(out.grad)
+                    if other.requires_grad and other.grad is None:
+                        other.grad = get_buffer(len(other.data))
+                        lib.zero_float_array((c_float * len(other.grad)).from_buffer(other.grad), len(other.grad))
+
+                        
+                    grad_out_ptr = (c_float * len(out.grad)).from_buffer(out.grad)
                     grad_A_ptr = (c_float * len(self.grad)).from_buffer(self.grad) if self.requires_grad else None
                     grad_B_ptr = (c_float * len(other.grad)).from_buffer(other.grad) if other.requires_grad else None
 
-                    lib.tensor_matmul_backward(
+                    lib.tensor_matmul(
+                        1,  # MATMUL_BACKWARD
                         (c_float * len(self.data)).from_buffer(self.data),
                         (c_float * len(other.data)).from_buffer(other.data),
-                        grad_out_c,
+                        grad_out_ptr,
                         grad_A_ptr,
                         grad_B_ptr,
-                        1,              # batch = 1 for 2D
-                        self.shape[0],  # M
-                        self.shape[1],  # K
-                        other.shape[1], # N
-                        True            # accumulate
+                        1,  # batch
+                        M, K, N,
+                        True
                     )
 
                 out._backward = _backward
@@ -469,29 +479,36 @@ class Tensor:
         assert self.shape == target.shape, f"Shape mismatch: {self.shape} vs {target.shape}"
         B, C = self.shape
         loss_data = get_buffer(B)
+        grad_input = get_buffer(B * C)
         probs_data = get_buffer(B * C)
 
+        # Forward pass: no grad_loss in the first call
         lib.tensor_softmax_ce(
             (c_float * len(self.data)).from_buffer(self.data),
             (c_float * len(target.data)).from_buffer(target.data),
+            None,  # grad_loss is NULL in the forward pass
             (c_float * B).from_buffer(loss_data),
-            (c_float * (B * C)).from_buffer(probs_data),
+            (c_float * len(grad_input)).from_buffer(grad_input),
+            (c_float * len(probs_data)).from_buffer(probs_data),
             B,
             C
         )
 
         loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,))
-        probs = Tensor(probs_data, shape=(B, C))  # only for backprop
+        probs = Tensor(probs_data, shape=(B, C))  # For debugging or further use
 
         if loss.requires_grad:
             def _backward():
                 if self.requires_grad:
-                    lib.tensor_softmax_ce_backward(
-                        (c_float * len(loss.grad)).from_buffer(loss.grad),
-                        (c_float * len(probs.data)).from_buffer(probs.data),
+                    # Call the fused function again, this time with grad_loss from next layer
+                    lib.tensor_softmax_ce(
+                        (c_float * len(self.data)).from_buffer(self.data),
                         (c_float * len(target.data)).from_buffer(target.data),
-                        (c_float * len(self.grad)).from_buffer(self.grad),
-                        B, 
+                        (c_float * len(loss.grad)).from_buffer(loss.grad),  # Use upstream gradient
+                        (c_float * B).from_buffer(loss_data),               # Losses can be reused
+                        (c_float * len(self.grad)).from_buffer(self.grad),  # Output gradient
+                        None,  # probs_out not needed in backward
+                        B,
                         C
                     )
 
@@ -508,12 +525,12 @@ class Tensor:
             (c_float * len(out_data)).from_buffer(out_data),
             len(self.data)
         )
-
+        
         out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape)
 
         if out.requires_grad:
             def _backward():
-                if out.grad is None or all(g == 0.0 for g in out.grad):
+                if out.grad is None:
                     return
                 
                 if self.requires_grad:

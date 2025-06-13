@@ -59,9 +59,18 @@ def load_model(filepath):
 
 def accuracy(pred, target):
     logits = pred.data
-    pred_class = [max(range(10), key=lambda i: logits[i + j * 10]) for j in range(len(logits) // 10)]
-    true_class = [max(range(10), key=lambda i: target.data[i + j * 10]) for j in range(len(target.data) // 10)]
-    return sum(int(p == t) for p, t in zip(pred_class, true_class)) / len(pred_class)
+    targets = target.data
+    num_classes = 10
+    batch_size = len(logits) // num_classes
+
+    correct = 0
+    for j in range(batch_size):
+        pred_index = max(range(num_classes), key=lambda i: logits[j * num_classes + i])
+        true_index = max(range(num_classes), key=lambda i: targets[j * num_classes + i])
+        if pred_index == true_index:
+            correct += 1
+    
+    return correct / batch_size
 
 def evaluate(model, test_path='mnist_test.bin'):
     input_size = 784
@@ -122,7 +131,7 @@ def train():
     hidden1 = 128
     hidden2 = 64
     batch_size = 32
-    num_epochs = 10
+    num_epochs = 20
     sample_size = input_size + output_size
 
     model = MLP(input_size, hidden1, hidden2, output_size)

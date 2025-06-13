@@ -14,7 +14,7 @@
 #include <x86intrin.h>
 
 #define VEC_SIZE 8
-#define MAX_CLASSES 512
+#define MAX_CLASSES 1024
 
 // gemmm cache
 static float* cached_B_T = NULL;
@@ -62,92 +62,86 @@ int tensor_ops_init() {
     return 0;
 }
 
-// AVX2 horizontal sum helper
-inline float hsum_avx(__m256 v) {
+static inline float hsum256_ps(__m256 v) {
     __m128 low = _mm256_castps256_ps128(v);
     __m128 high = _mm256_extractf128_ps(v, 1);
-    __m128 sum = _mm_add_ps(low, high);
-    sum = _mm_hadd_ps(sum, sum);
-    sum = _mm_hadd_ps(sum, sum);
-    return _mm_cvtss_f32(sum);
+    __m128 sum128 = _mm_add_ps(low, high);
+    sum128 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
+    sum128 = _mm_add_ss(sum128, _mm_movehdup_ps(sum128));
+    return _mm_cvtss_f32(sum128);
 }
 
-// Improved log approximation for AVX
 static inline __m256 log256_ps(__m256 x) {
-    // Handle invalid inputs
-    __m256 valid_mask = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_GT_OQ);
-    x = _mm256_max_ps(x, _mm256_set1_ps(FLT_MIN)); // Avoid log(0)
-    
     __m256 one = _mm256_set1_ps(1.0f);
-    
-    // Extract exponent
-    __m256i exp = _mm256_and_si256(_mm256_castps_si256(x), _mm256_set1_epi32(0x7F800000));
-    exp = _mm256_srli_epi32(exp, 23);
-    __m256 e = _mm256_cvtepi32_ps(exp);
-    e = _mm256_sub_ps(e, _mm256_set1_ps(127.0f));
-    
-    // Extract mantissa and set exponent to 0
-    __m256 m = _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x007FFFFF)));
-    m = _mm256_or_ps(m, _mm256_castsi256_ps(_mm256_set1_epi32(0x3F800000))); // Set exponent to 0
-    
-    // Improved minimax polynomial approximation
-    __m256 p = _mm256_set1_ps(0.1520749f);
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-0.5659487f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.9614227f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.0956714f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.9819095f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-0.5860944f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.3479320f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(0.1749663f));
-    p = _mm256_fmadd_ps(p, _mm256_sub_ps(m, one), e);
-    
-    // Multiply by ln(2)
-    p = _mm256_mul_ps(p, _mm256_set1_ps(0.6931472f));
-    
-    // Handle invalid inputs
-    return _mm256_and_ps(p, valid_mask);
+
+    // avoid log(0)
+    x = _mm256_max_ps(x, _mm256_set1_ps(1e-30f));
+
+    __m256i ix = _mm256_castps_si256(x);
+    __m256i exp = _mm256_srli_epi32(ix, 23);
+
+    __m256 e = _mm256_cvtepi32_ps(_mm256_sub_epi32(exp, _mm256_set1_epi32(127)));
+
+    __m256i mant_mask = _mm256_set1_epi32(0x007FFFFF);
+    __m256 mantissa = _mm256_or_ps(_mm256_castsi256_ps(_mm256_and_si256(ix, mant_mask)),
+                                   _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000)));
+
+    __m256 m = _mm256_sub_ps(mantissa, one);
+
+    // polynomial approx: log(1 + m)
+    __m256 p = _mm256_set1_ps(7.0376836292E-2f);
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.1514610310E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(1.1676998740E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.2420140846E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+1.4249322787E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.6668057665E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+2.0000714765E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-2.4999993993E-1f));
+    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+3.3333331174E-1f));
+    p = _mm256_mul_ps(p, m);
+
+    return _mm256_add_ps(_mm256_mul_ps(e, _mm256_set1_ps(0.69314718056f)), p);
 }
 
-// Improved exp approximation
 static inline __m256 exp256_ps(__m256 x) {
-    // Clamp input to avoid overflow/underflow
-    x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-88.0f)), _mm256_set1_ps(88.0f));
-    
-    // Constants for exp approximation
-    const __m256 ln2 = _mm256_set1_ps(0.6931472f);
+    const __m256 ln2 = _mm256_set1_ps(0.69314718056f);
+    const __m256 inv_ln2 = _mm256_set1_ps(1.44269504089f);  // 1/ln(2)
     const __m256 one = _mm256_set1_ps(1.0f);
-    
-    // n = round(x / ln2)
-    __m256 n = _mm256_round_ps(_mm256_div_ps(x, ln2), _MM_FROUND_TO_NEAREST_INT);
-    
+    const __m256i bias = _mm256_set1_epi32(127);
+
+    // clamp x to avoid overflow
+    x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.336544f)), _mm256_set1_ps(88.722839f));
+
+    // n = floor(x / ln2 + 0.5)
+    __m256 fx = _mm256_fmadd_ps(x, inv_ln2, _mm256_set1_ps(0.5f));
+    __m256i emm0 = _mm256_cvttps_epi32(fx);
+    fx = _mm256_cvtepi32_ps(emm0);
+
     // r = x - n * ln2
-    x = _mm256_fnmadd_ps(n, ln2, x);
-    
-    // Polynomial approximation for exp(r)
-    __m256 result = one;
-    __m256 r = x;
-    result = _mm256_add_ps(result, r);
-    
-    r = _mm256_mul_ps(r, x);
-    result = _mm256_fmadd_ps(r, _mm256_set1_ps(0.5f), result);
-    
-    r = _mm256_mul_ps(r, x);
-    result = _mm256_fmadd_ps(r, _mm256_set1_ps(0.166666666f), result);
-    
-    r = _mm256_mul_ps(r, x);
-    result = _mm256_fmadd_ps(r, _mm256_set1_ps(0.041666666f), result);
-    
-    r = _mm256_mul_ps(r, x);
-    result = _mm256_fmadd_ps(r, _mm256_set1_ps(0.008333333f), result);
-    
-    r = _mm256_mul_ps(r, x);
-    result = _mm256_fmadd_ps(r, _mm256_set1_ps(0.001388889f), result);
-    
-    // Scale by 2^n
-    __m256 pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(
-                    _mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23));
-    
-    return _mm256_mul_ps(result, pow2n);
+    __m256 r = _mm256_fnmadd_ps(fx, ln2, x);
+
+    // polynomial approximation for exp(r)
+    __m256 y = _mm256_set1_ps(1.9875691500E-4f);
+    y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(1.3981999507E-3f));
+    y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(8.3334519073E-3f));
+    y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(4.1665795894E-2f));
+    y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(1.6666665459E-1f));
+    y = _mm256_fmadd_ps(y, r, _mm256_set1_ps(5.0000001201E-1f));
+    y = _mm256_fmadd_ps(y, r, one);
+
+    // 2^n
+    __m256i pow2n = _mm256_slli_epi32(_mm256_add_epi32(emm0, bias), 23);
+    __m256 result = _mm256_mul_ps(y, _mm256_castsi256_ps(pow2n));
+    return result;
+}
+
+static inline float hmax256_ps(__m256 v) {
+    __m128 low = _mm256_castps256_ps128(v);
+    __m128 high = _mm256_extractf128_ps(v, 1);
+    __m128 max128 = _mm_max_ps(low, high);
+    max128 = _mm_max_ps(max128, _mm_movehl_ps(max128, max128));
+    max128 = _mm_max_ss(max128, _mm_movehdup_ps(max128));
+    return _mm_cvtss_f32(max128);
 }
 
 // Utility to allocate or reuse aligned memory
@@ -657,194 +651,111 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
     }
 }
 
-void tensor_softmax_cross_entropy(const float* logits, 
-                                             const float* labels, 
-                                             float* loss_out, 
-                                             float* probs_out, 
-                                             size_t class_count) { 
-    if (!logits || !labels || !loss_out || !probs_out) { 
-        fprintf(stderr, "Error: NULL pointer passed to tensor_softmax_cross_entropy_with_probs\n"); 
-        return; 
-    } 
-     
-    if (class_count > MAX_CLASSES) { 
-        fprintf(stderr, "Error: Class count %zu exceeds MAX_CLASSES (%d)\n", class_count, MAX_CLASSES); 
-        return; 
-    } 
- 
-    // 1. Find max logit using SIMD 
-    __m256 vmax = _mm256_set1_ps(-FLT_MAX); 
-    size_t i = 0; 
-    for (; i + VEC_SIZE <= class_count; i += VEC_SIZE) { 
-        __m256 vlogits = _mm256_loadu_ps(logits + i); 
-        vmax = _mm256_max_ps(vmax, vlogits); 
-    } 
-     
-    // Find max value within the vector 
-    float max_val = hsum_avx(_mm256_max_ps( 
-        _mm256_max_ps( 
-            _mm256_permute2f128_ps(vmax, vmax, 1), 
-            vmax 
-        ), 
-        _mm256_permute_ps(vmax, 0x4E) // Shuffle within 128-bit lanes 
-    )); 
-     
-    // Check remaining elements 
-    for (; i < class_count; i++) { 
-        if (logits[i] > max_val) max_val = logits[i]; 
-    } 
- 
-    // 2. Compute exp, sum, and cross-entropy in a single pass
-    __m256 vmax_scalar = _mm256_set1_ps(max_val); 
-    __m256 vsum_exp = _mm256_setzero_ps(); 
-    __m256 vloss = _mm256_setzero_ps();
-    const float epsilon = 1e-7f;
-    __m256 vepsilon = _mm256_set1_ps(epsilon);
-     
-    // First pass: compute exp and sum
-    i = 0; 
-    for (; i + VEC_SIZE <= class_count; i += VEC_SIZE) { 
-        _mm_prefetch(logits + i + VEC_SIZE, _MM_HINT_T0); 
-        _mm_prefetch(labels + i + VEC_SIZE, _MM_HINT_T0);
-         
-        __m256 vlogits = _mm256_loadu_ps(logits + i); 
-        __m256 vshifted = _mm256_sub_ps(vlogits, vmax_scalar); 
-        __m256 vexp = exp256_ps(vshifted); 
-        _mm256_storeu_ps(probs_out + i, vexp); 
-        vsum_exp = _mm256_add_ps(vsum_exp, vexp); 
-    } 
-     
-    // Sum the vector elements 
-    float sum_exp = hsum_avx(vsum_exp); 
-     
-    // Process remaining elements 
-    for (; i < class_count; i++) { 
-        probs_out[i] = expf(logits[i] - max_val); 
-        sum_exp += probs_out[i]; 
-    } 
- 
-    // Second pass: normalize and compute cross-entropy in one go
-    __m256 vsum_exp_scalar = _mm256_set1_ps(sum_exp); 
-    i = 0; 
-    for (; i + VEC_SIZE <= class_count; i += VEC_SIZE) { 
-        __m256 vprobs = _mm256_loadu_ps(probs_out + i); 
-        __m256 vlabels = _mm256_loadu_ps(labels + i);
-        
-        // Normalize probabilities
-        __m256 vnormalized = _mm256_div_ps(vprobs, vsum_exp_scalar); 
-        _mm256_storeu_ps(probs_out + i, vnormalized); 
-        
-        // Compute cross-entropy contribution
-        __m256 vsafe_probs = _mm256_add_ps(vnormalized, vepsilon);
-        __m256 vlog_probs = log256_ps(vsafe_probs);
-        __m256 vweighted = _mm256_mul_ps(vlabels, vlog_probs);
-        vloss = _mm256_sub_ps(vloss, vweighted);
-    } 
-     
-    float loss = hsum_avx(vloss);
-    
-    // Process remaining elements 
-    for (; i < class_count; i++) { 
-        // Normalize
-        probs_out[i] /= sum_exp; 
-        
-        // Compute cross-entropy contribution
-        if (labels[i] > 0.0f) {
-            loss -= labels[i] * logf(probs_out[i] + epsilon);
-        }
-    } 
- 
-    // Ensure loss is positive
-    *loss_out = fabsf(loss); 
-}
-
-void tensor_softmax_ce(const float* logits,
-                                         const float* labels,
-                                         float* losses,
-                                         float* probs_out,
-                                         size_t batch,
-                                         size_t class_count) {
-    if (!logits || !labels || !losses || !probs_out) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_op_jit_softmax_ce_with_probs\n");
+void tensor_softmax_ce(
+    const float* logits,
+    const float* labels,
+    const float* grad_loss,  // Optional: NULL if not provided
+    float* losses,
+    float* grad_input,
+    float* probs_out,        // Optional: NULL if not needed
+    size_t batch,
+    size_t class_count
+) {
+    if (!logits || !labels || !losses || !grad_input) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_softmax_ce_fused\n");
         return;
     }
-    
-    #pragma omp parallel for if(batch > 4)
-    for (size_t i = 0; i < batch; ++i) {
-        const float* logits_row = logits + i * class_count;
-        const float* labels_row = labels + i * class_count;
-        float* probs_row = probs_out + i * class_count;
-        float* loss_ptr = losses + i;
 
-        tensor_softmax_cross_entropy(
-            logits_row,
-            labels_row,
-            loss_ptr,
-            probs_row,
-            class_count
-        );
-    }
-}
-
-void tensor_softmax_ce_backward( const float* grad_loss, const float* probs, const float* target, float* grad_input, size_t B, size_t C ) {
-    size_t total = B * C;
-    size_t i = 0;
-
-    // If grad_loss is NULL, scale = 1.0f for all elements
-    if (grad_loss == NULL) {
-        for (; i + 8 <= total; i += 8) {
-            __m256 p = _mm256_loadu_ps(probs + i);
-            __m256 t = _mm256_loadu_ps(target + i);
-            __m256 g = _mm256_loadu_ps(grad_input + i);
-
-            __m256 diff = _mm256_sub_ps(p, t);
-            __m256 res = _mm256_add_ps(g, diff); // g += (p - t) * 1.0f
-
-            _mm256_storeu_ps(grad_input + i, res);
-        }
-    } else {
-        // When grad_loss is not NULL, scale varies per batch element
-        for (; i + 8 <= total; i += 8) {
-            // Compute which batch indices these 8 elements belong to
-            // We assume row-major: element i belongs to batch i / C
-            size_t batch_idx0 = (i + 0) / C;
-            size_t batch_idx1 = (i + 1) / C;
-            size_t batch_idx2 = (i + 2) / C;
-            size_t batch_idx3 = (i + 3) / C;
-            size_t batch_idx4 = (i + 4) / C;
-            size_t batch_idx5 = (i + 5) / C;
-            size_t batch_idx6 = (i + 6) / C;
-            size_t batch_idx7 = (i + 7) / C;
-
-            // Gather scales per element from grad_loss (scalar values)
-            float scales[8] = {
-                grad_loss[batch_idx0],
-                grad_loss[batch_idx1],
-                grad_loss[batch_idx2],
-                grad_loss[batch_idx3],
-                grad_loss[batch_idx4],
-                grad_loss[batch_idx5],
-                grad_loss[batch_idx6],
-                grad_loss[batch_idx7]
-            };
-
-            __m256 scale_vec = _mm256_loadu_ps(scales);
-            __m256 p = _mm256_loadu_ps(probs + i);
-            __m256 t = _mm256_loadu_ps(target + i);
-            __m256 g = _mm256_loadu_ps(grad_input + i);
-
-            __m256 diff = _mm256_sub_ps(p, t);
-            __m256 scaled_diff = _mm256_mul_ps(diff, scale_vec);
-            __m256 res = _mm256_add_ps(g, scaled_diff);
-
-            _mm256_storeu_ps(grad_input + i, res);
-        }
+    if (class_count > MAX_CLASSES) {
+        fprintf(stderr, "Error: class_count %zu exceeds MAX_CLASSES (%d)\n", class_count, MAX_CLASSES);
+        return;
     }
 
-    // Handle remaining elements (tail loop)
-    for (; i < total; ++i) {
-        float scale = grad_loss == NULL ? 1.0f : grad_loss[i / C];
-        grad_input[i] += (probs[i] - target[i]) * scale;
+    const float epsilon = 1e-8f;
+    const __m256 v_epsilon = _mm256_set1_ps(epsilon);
+
+    #pragma omp parallel for
+    for (size_t b = 0; b < batch; ++b) {
+        const float* logits_row = logits + b * class_count;
+        const float* labels_row = labels + b * class_count;
+        float* probs_row = probs_out ? probs_out + b * class_count : NULL;
+        float* grad_row = grad_input + b * class_count;
+
+        // Find max value for numerical stability
+        __m256 v_max = _mm256_set1_ps(-FLT_MAX);
+        size_t j = 0;
+        for (; j + 8 <= class_count; j += 8) {
+            __m256 v_logits = _mm256_loadu_ps(logits_row + j);
+            v_max = _mm256_max_ps(v_max, v_logits);
+        }
+
+        float max_val = hmax256_ps(v_max);
+        for (; j < class_count; ++j) {
+            if (logits_row[j] > max_val)
+                max_val = logits_row[j];
+        }
+
+        v_max = _mm256_set1_ps(max_val);
+
+        // Compute exp(logits - max) and sum
+        float sum_exp = 0.0f;
+        size_t i = 0;
+        for (; i + 8 <= class_count; i += 8) {
+            __m256 v_logits = _mm256_loadu_ps(logits_row + i);
+            __m256 v_shifted = _mm256_sub_ps(v_logits, v_max);
+            __m256 v_exp = exp256_ps(v_shifted);
+            if (probs_row) _mm256_storeu_ps(probs_row + i, v_exp);
+            sum_exp += hsum256_ps(v_exp);
+        }
+
+        for (; i < class_count; ++i) {
+            float exp_val = expf(logits_row[i] - max_val);
+            if (probs_row) probs_row[i] = exp_val;
+            sum_exp += exp_val;
+        }
+
+        __m256 v_sum_exp = _mm256_set1_ps(sum_exp);
+        __m256 v_recip = _mm256_rcp_ps(v_sum_exp);
+        v_recip = _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(2.0f), _mm256_mul_ps(v_sum_exp, v_recip)), v_recip);
+
+        float loss = 0.0f;
+        i = 0;
+        for (; i + 8 <= class_count; i += 8) {
+            __m256 v_probs = _mm256_loadu_ps(probs_row ? probs_row + i : logits_row + i);
+            v_probs = _mm256_mul_ps(v_probs, v_recip);  // Normalize
+
+            if (probs_row) _mm256_storeu_ps(probs_row + i, v_probs);
+
+            __m256 v_labels = _mm256_loadu_ps(labels_row + i);
+            __m256 v_clamped = _mm256_max_ps(v_probs, v_epsilon);
+            __m256 v_log = log256_ps(v_clamped);
+            __m256 v_mul = _mm256_mul_ps(v_labels, v_log);
+            loss -= hsum256_ps(v_mul);
+
+            __m256 v_diff = _mm256_sub_ps(v_probs, v_labels);
+            if (grad_loss) {
+                __m256 v_grad_loss = _mm256_set1_ps(grad_loss[b]);
+                v_diff = _mm256_mul_ps(v_diff, v_grad_loss);
+            }
+            _mm256_storeu_ps(grad_row + i, v_diff);
+        }
+
+        // Handle tail
+        for (; i < class_count; ++i) {
+            float prob = probs_row ? probs_row[i] : expf(logits_row[i] - max_val);
+            prob /= sum_exp;
+            if (probs_row) probs_row[i] = prob;
+
+            float label = labels_row[i];
+            float clamped = fmaxf(prob, epsilon);
+            loss -= label * logf(clamped);
+
+            float grad_val = prob - label;
+            if (grad_loss) grad_val *= grad_loss[b];
+            grad_row[i] = grad_val;
+        }
+
+        losses[b] = loss;
     }
 }
 
@@ -856,167 +767,135 @@ void tensor_matmul_free_cache() {
     }
 }
 
-void tensor_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C,
-                         size_t batch, size_t M, size_t K, size_t N) {
-    if (!A || !B || !C) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_matmul\n");
+void tensor_matmul(
+    PassMode mode,
+    const float* A, const float* B, const float* grad_out,  // grad_out used in backward
+    float* C_or_A, float* grad_B,                      // C in forward, grad_A in backward
+    size_t batch, size_t M, size_t K, size_t N,
+    bool accumulate                                          // only used for backward
+) {
+    if (!A || !B || !C_or_A || (mode == MATMUL_BACKWARD && !grad_out)) {
+        fprintf(stderr, "Error: NULL pointer in tensor_matmul_combined\n");
         return;
     }
 
-    size_t total_ops = M * K * N;
-
-    // Handle small matrices directly
-    if (total_ops < 10000) {
-        #pragma omp parallel for
-        for (size_t b = 0; b < batch; ++b) {
-            const float* A_b = A + b * M * K;
-            float* C_b = C + b * M * N;
-            for (size_t i = 0; i < M; i++) {
-                for (size_t j = 0; j < N; j++) {
-                    float sum = 0.0f;
-                    for (size_t k = 0; k < K; k++) {
-                        sum += A_b[i * K + k] * B[k * N + j];
-                    }
-                    C_b[i * N + j] = sum;
-                }
-            }
-        }
-        return;
-    }
-
-    // Allocate and transpose B once
-    float* __restrict B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
-    
+    float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
     if (!B_T) {
         fprintf(stderr, "Error: Memory allocation failed\n");
         return;
     }
 
-    // Transpose B into B_T: B_T[n * K + k] = B[k * N + n]
-    #pragma omp parallel for
-    for (size_t k = 0; k < K; ++k) {
-        for (size_t n = 0; n < N; ++n) {
-            B_T[n * K + k] = B[k * N + n];
-        }
-    }
-
-    // Perform batched matrix multiplication using shared B_T
-    #pragma omp parallel for
-    for (size_t b = 0; b < batch; ++b) {
-        const float* __restrict A_b = A + b * M * K;
-        float* __restrict C_b = C + b * M * N;
-
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < N; ++j) {
-                __m256 sum_vec = _mm256_setzero_ps();
-                size_t k = 0;
-
-                for (; k + 8 <= K; k += 8) {
-                    __m256 a_vec = _mm256_loadu_ps(&A_b[i * K + k]);
-                    __m256 b_vec = _mm256_loadu_ps(&B_T[j * K + k]);
-                    sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
-                }
-
-                //float sum = hsum_avx(sum_vec);
-
-                __attribute__((aligned(32))) float temp[8];
-                _mm256_store_ps(temp, sum_vec);
-                float sum = temp[0] + temp[1] + temp[2] + temp[3] +
-                            temp[4] + temp[5] + temp[6] + temp[7];
-
-
-                for (; k < K; ++k) {
-                    sum += A_b[i * K + k] * B_T[j * K + k];
-                }
-
-                C_b[i * N + j] = sum;
-            }
-        }
-    }
-    atexit(tensor_matmul_free_cache);
-}
-
-void tensor_matmul_backward(const float* A, const float* B, const float* grad_out,
-                            float* grad_A, float* grad_B,
-                            size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
-    float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
-    if (!B_T) return;
-
-    // Transpose B: [K x N] -> [N x K]
-    #pragma omp parallel for
+    // Shared transpose: B_T[n * K + k] = B[k * N + n]
+    #pragma omp parallel for collapse(2)
     for (size_t k = 0; k < K; ++k)
         for (size_t n = 0; n < N; ++n)
             B_T[n * K + k] = B[k * N + n];
 
-    // Compute grad_A = grad_out @ B^T
-    #pragma omp parallel for collapse(2)
-    for (size_t b = 0; b < batch; ++b) {
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < K; ++j) {
-                __m256 vsum = _mm256_setzero_ps();
-                size_t k = 0;
-                for (; k + 7 < N; k += 8) {
-                    // Load 8 floats of grad_out
-                    __m256 vgrad_out = _mm256_loadu_ps(&grad_out[b * M * N + i * N + k]);
-                    // Load 8 floats of B_T (row k)
-                    __m256 vB_T = _mm256_loadu_ps(&B_T[(k)*K + j]);
-                    vsum = _mm256_fmadd_ps(vgrad_out, vB_T, vsum);
-                }
-                // Horizontal sum vsum
-                float sum = 0.f;
-                float buf[8];
-                _mm256_storeu_ps(buf, vsum);
-                for (int x = 0; x < 8; ++x) sum += buf[x];
-
-                // Handle leftover N elements
-                for (; k < N; ++k) {
-                    sum += grad_out[b * M * N + i * N + k] * B_T[k * K + j];
-                }
-
-                if (accumulate)
-                    grad_A[b * M * K + i * K + j] += sum;
-                else
-                    grad_A[b * M * K + i * K + j] = sum;
-            }
-        }
-    }
-    
-    #pragma omp parallel for collapse(2)
-    for (size_t b = 0; b < batch; ++b) {
-        for (size_t i = 0; i < K; ++i) {
-            for (size_t j = 0; j < N; ++j) {
-                __m256 vsum = _mm256_setzero_ps();
-                size_t k = 0;
-                for (; k + 7 < M; k += 8) {
-                    float buf_a[8], buf_g[8];
-                    for (int x = 0; x < 8; ++x) {
-                        buf_a[x] = A[b * M * K + (k + x) * K + i];         // A[b][k+x][i]
-                        buf_g[x] = grad_out[b * M * N + (k + x) * N + j];  // grad_out[b][k+x][j]
+    if (mode == MATMUL_FORWARD) {
+        size_t total_ops = M * K * N;
+        if (total_ops < 10000) {
+            #pragma omp parallel for
+            for (size_t b = 0; b < batch; ++b) {
+                const float* A_b = A + b * M * K;
+                float* C_b = C_or_A + b * M * N;
+                for (size_t i = 0; i < M; i++) {
+                    for (size_t j = 0; j < N; j++) {
+                        float sum = 0.0f;
+                        for (size_t k = 0; k < K; k++)
+                            sum += A_b[i * K + k] * B[k * N + j];
+                        C_b[i * N + j] = sum;
                     }
-                    __m256 va = _mm256_loadu_ps(buf_a);
-                    __m256 vg = _mm256_loadu_ps(buf_g);
-                    vsum = _mm256_fmadd_ps(va, vg, vsum);
                 }
+            }
+            return;
+        }
 
-                float sum = 0.f;
-                float buf[8];
-                _mm256_storeu_ps(buf, vsum);
-                for (int x = 0; x < 8; ++x) sum += buf[x];
+        #pragma omp parallel for
+        for (size_t b = 0; b < batch; ++b) {
+            const float* A_b = A + b * M * K;
+            float* C_b = C_or_A + b * M * N;
 
-                for (; k < M; ++k) {
-                    sum += A[b * M * K + k * K + i] * grad_out[b * M * N + k * N + j];
+            for (size_t i = 0; i < M; ++i) {
+                for (size_t j = 0; j < N; ++j) {
+                    __m256 sum_vec = _mm256_setzero_ps();
+                    size_t k = 0;
+                    for (; k + 8 <= K; k += 8) {
+                        __m256 a_vec = _mm256_loadu_ps(&A_b[i * K + k]);
+                        __m256 b_vec = _mm256_loadu_ps(&B_T[j * K + k]);
+                        sum_vec = _mm256_fmadd_ps(a_vec, b_vec, sum_vec);
+                    }
+                    float temp[8];
+                    _mm256_storeu_ps(temp, sum_vec);
+                    float sum = temp[0] + temp[1] + temp[2] + temp[3] +
+                                temp[4] + temp[5] + temp[6] + temp[7];
+                    for (; k < K; ++k)
+                        sum += A_b[i * K + k] * B_T[j * K + k];
+                    C_b[i * N + j] = sum;
                 }
+            }
+        }
+    } else if (mode == MATMUL_BACKWARD) {
+        float* grad_A = C_or_A;
 
-                if (accumulate)
-                    grad_B[b * K * N + i * N + j] += sum;
-                else
-                    grad_B[b * K * N + i * N + j] = sum;
+        #pragma omp parallel for collapse(2)
+        for (size_t b = 0; b < batch; ++b) {
+            for (size_t i = 0; i < M; ++i) {
+                for (size_t j = 0; j < K; ++j) {
+                    __m256 vsum = _mm256_setzero_ps();
+                    size_t k = 0;
+                    for (; k + 7 < N; k += 8) {
+                        __m256 vgrad_out = _mm256_loadu_ps(&grad_out[b * M * N + i * N + k]);
+                        __m256 vB_T = _mm256_loadu_ps(&B_T[k * K + j]);
+                        vsum = _mm256_fmadd_ps(vgrad_out, vB_T, vsum);
+                    }
+                    float buf[8];
+                    _mm256_storeu_ps(buf, vsum);
+                    float sum = buf[0] + buf[1] + buf[2] + buf[3] + buf[4] + buf[5] + buf[6] + buf[7];
+                    for (; k < N; ++k)
+                        sum += grad_out[b * M * N + i * N + k] * B_T[k * K + j];
+
+                    if (accumulate)
+                        grad_A[b * M * K + i * K + j] += sum;
+                    else
+                        grad_A[b * M * K + i * K + j] = sum;
+                }
+            }
+        }
+
+        #pragma omp parallel for collapse(2)
+        for (size_t b = 0; b < batch; ++b) {
+            for (size_t i = 0; i < K; ++i) {
+                for (size_t j = 0; j < N; ++j) {
+                    __m256 vsum = _mm256_setzero_ps();
+                    size_t k = 0;
+                    for (; k + 7 < M; k += 8) {
+                        float buf_a[8], buf_g[8];
+                        for (int x = 0; x < 8; ++x) {
+                            buf_a[x] = A[b * M * K + (k + x) * K + i];
+                            buf_g[x] = grad_out[b * M * N + (k + x) * N + j];
+                        }
+                        __m256 va = _mm256_loadu_ps(buf_a);
+                        __m256 vg = _mm256_loadu_ps(buf_g);
+                        vsum = _mm256_fmadd_ps(va, vg, vsum);
+                    }
+                    float buf[8];
+                    _mm256_storeu_ps(buf, vsum);
+                    float sum = buf[0] + buf[1] + buf[2] + buf[3] + buf[4] + buf[5] + buf[6] + buf[7];
+                    for (; k < M; ++k)
+                        sum += A[b * M * K + k * K + i] * grad_out[b * M * N + k * N + j];
+
+                    if (accumulate)
+                        grad_B[b * K * N + i * N + j] += sum;
+                    else
+                        grad_B[b * K * N + i * N + j] = sum;
+                }
             }
         }
     }
+
     atexit(tensor_matmul_free_cache);
 }
-    
+
 // Reductions
 float tensor_sum(const float* input, size_t len) {
     if (!input) {
@@ -1039,7 +918,7 @@ float tensor_sum(const float* input, size_t len) {
         }
 
         // Reduce the SIMD register to scalar
-        float partial_sum = hsum_avx(vsum);
+        float partial_sum = hsum256_ps(vsum);
 
         // Add thread-local partial sum to the global reduction
         total_sum += partial_sum;

@@ -54,8 +54,13 @@ function_signatures = {
 
 }
 
-_buffer_pool = {}
+# Set function signatures
+for func_name, (argtypes, restype) in function_signatures.items():
+    func = getattr(lib, func_name)
+    func.argtypes = argtypes
+    func.restype = restype
 
+_buffer_pool = {}
 def get_buffer(size):
     """Reuse or create a float32 buffer of the given size."""
     if size in _buffer_pool:
@@ -65,15 +70,8 @@ def get_buffer(size):
     return buf
 
 _broadcast_cache = {}
-
 def get_broadcast_cache_key(data, from_shape, to_shape):
     return (id(data), from_shape, to_shape)
-
-# Set function signatures
-for func_name, (argtypes, restype) in function_signatures.items():
-    func = getattr(lib, func_name)
-    func.argtypes = argtypes
-    func.restype = restype
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -117,8 +115,13 @@ class Tensor:
         build_topo(self)
         
         for t in topo:
-            if t.requires_grad and t.grad is None:
-                t.grad = get_buffer(len(t.data))
+            if t.requires_grad:
+                if t.grad is None:
+                    t.grad = t.grad = array.array('f', [0.0] * len(t.data))
+                lib.zero_float_array(
+                    (c_float * len(t.grad)).from_buffer(t.grad),
+                    len(t.grad)
+                )
         
         lib.tensor_fill_inplace(
             (c_float * len(self.grad)).from_buffer(self.grad),
@@ -128,8 +131,6 @@ class Tensor:
         for t in reversed(topo):
             if t._backward is not None:
                 t._backward()
-            #if t.grad is not None:
-               # t.sanitize_gradients()
 
         def _compute_strides(shape):
             strides = [1] * len(shape)
@@ -296,7 +297,7 @@ class Tensor:
         out_size = 1
         for dim in out_shape:
             out_size *= dim
-        out_data = get_buffer(out_size)
+        out_data = array.array('f', [0.0] *out_size)
 
         # Compute batching
         if len(out_shape) > 1:
@@ -328,22 +329,14 @@ class Tensor:
             out._batch_info = (n, batch_size if use_batch else None)
 
             def _backward():
-                if self.requires_grad and self.grad is None:
-                    self.grad = array.array('f', get_buffer(len(self.data)))
-                if other.requires_grad and other.grad is None:
-                    other.grad = array.array('f', get_buffer(len(other.data)))
-
                 out_grad = out.grad
                 a_broadcasted = out._cached_a_broadcasted
                 b_broadcasted = out._cached_b_broadcasted
                 n, batch_size_cached = out._batch_info
                 use_batch_cached = batch_size_cached is not None
 
-                self_grad = get_buffer(len(a_broadcasted))
-                other_grad = get_buffer(len(b_broadcasted))
-
-                lib.zero_float_array((c_float * len(self_grad)).from_buffer(self_grad), len(self_grad))
-                lib.zero_float_array((c_float * len(other_grad)).from_buffer(other_grad), len(other_grad))
+                self_grad = array.array('f', [0.0] *  len(a_broadcasted))
+                other_grad = array.array('f', [0.0] * len(b_broadcasted))
 
                 grad_fn = getattr(lib, grad_fn_name)
 
@@ -440,16 +433,6 @@ class Tensor:
                 def _backward():
                     if out.grad is None:
                         return
-                    
-                    # Ensure gradient buffers are allocated and zeroed
-                    if self.requires_grad and self.grad is None:
-                        self.grad = get_buffer(len(self.data))
-                        lib.zero_float_array((c_float * len(self.grad)).from_buffer(self.grad), len(self.grad))
-
-                    if other.requires_grad and other.grad is None:
-                        other.grad = get_buffer(len(other.data))
-                        lib.zero_float_array((c_float * len(other.grad)).from_buffer(other.grad), len(other.grad))
-
                         
                     grad_out_ptr = (c_float * len(out.grad)).from_buffer(out.grad)
                     grad_A_ptr = (c_float * len(self.grad)).from_buffer(self.grad) if self.requires_grad else None
@@ -547,7 +530,7 @@ class Tensor:
         return out
     
     def mean(self):
-        result = lib.tensor_mean((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
+        result = lib.tensor_mean((c_float * len(self.data)).from_buffer(self.data), len(self.data))
         out = Tensor([result], requires_grad=self.requires_grad)
         
         if out.requires_grad:
@@ -558,8 +541,8 @@ class Tensor:
                     grad_array = array.array('f', [grad_val] * len(self.grad))
                     
                     lib.tensor_add_inplace(
-                        (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                        (ctypes.c_float * len(grad_array)).from_buffer(grad_array),
+                        (c_float * len(self.grad)).from_buffer(self.grad),
+                        (c_float * len(grad_array)).from_buffer(grad_array),
                         len(self.grad)
                     )
 
@@ -569,7 +552,7 @@ class Tensor:
         return out
 
     def sum(self):
-        result = lib.tensor_sum((ctypes.c_float * len(self.data)).from_buffer(self.data), len(self.data))
+        result = lib.tensor_sum((c_float * len(self.data)).from_buffer(self.data), len(self.data))
         out = Tensor([result], requires_grad=self.requires_grad)
 
         if out.requires_grad:
@@ -580,8 +563,8 @@ class Tensor:
                     grad_array = array.array('f', [grad_val] * len(self.grad))
 
                     lib.tensor_add_inplace(
-                        (ctypes.c_float * len(self.grad)).from_buffer(self.grad),
-                        (ctypes.c_float * len(grad_array)).from_buffer(grad_array),
+                        (c_float * len(self.grad)).from_buffer(self.grad),
+                        (c_float * len(grad_array)).from_buffer(grad_array),
                         len(self.grad)
                     )
 
@@ -599,4 +582,3 @@ def _init_backend():
         raise RuntimeError("tensor_ops_init failed (AVX2 unsupported?)")
     
 _init_backend()
-

@@ -8,15 +8,13 @@ lib.zero_float_array.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t
 _zero_buf = {}
 
 class SGD:
+    
     def __init__(self, parameters, lr=0.001):
         self.parameters = parameters
         self.lr = lr
 
     def step(self):
         for param in self.parameters:
-            if param.grad is not None:
-                # First sanitize gradients
-                param.sanitize_gradients()
                 
                 # Then apply SGD update in-place
                 lib.sgd_update_inplace(

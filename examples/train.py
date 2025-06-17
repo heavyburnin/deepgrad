@@ -38,16 +38,23 @@ def load_bin_dataset(bin_path, num_samples, sample_size):
 
         return mm, num_samples, sample_size
 
-def build_batch_from_mmap(mm, sample_indices, sample_size):
+def build_batch_from_mmap(mm, sample_indices, input_size, output_size):
+    sample_size = input_size + output_size
     sample_bytes = sample_size * 4
-    batch_array = array.array('f')
+    x_array = array.array('f')
+    y_array = array.array('f')
 
     for sample_idx in sample_indices:
         offset = sample_idx * sample_bytes
-        # Directly extend the array from mmap slice bytes
-        batch_array.frombytes(mm[offset : offset + sample_bytes])
+        raw = mm[offset : offset + sample_bytes]
 
-    return batch_array
+        sample = array.array('f')
+        sample.frombytes(raw)
+
+        x_array.extend(sample[:input_size])
+        y_array.extend(sample[input_size:])
+
+    return x_array, y_array
 
 def save_model(model, filepath):
     with open(filepath, 'wb') as f:
@@ -89,16 +96,7 @@ def evaluate(model, test_path='mnist_test.bin'):
         actual_batch_size = min(batch_size, num_samples - i)
         batch_indices = list(range(i, i + actual_batch_size))
 
-        batch_data = build_batch_from_mmap(mm, batch_indices, sample_size)
-
-        batch_x = array.array('f', [0.0] * (actual_batch_size * input_size))
-        batch_y = array.array('f', [0.0] * (actual_batch_size * output_size))
-
-        for j in range(actual_batch_size):
-            start = j * sample_size
-            batch_x[j*input_size:(j+1)*input_size] = batch_data[start:start+input_size]
-            batch_y[j*output_size:(j+1)*output_size] = batch_data[start+input_size:start+sample_size]
-
+        batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
         x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
         y = Tensor(batch_y, shape=(actual_batch_size, output_size))
 
@@ -153,16 +151,7 @@ def train():
             batch_indices = indices[i:i+batch_size]
             actual_batch_size = len(batch_indices)
 
-            batch_data = build_batch_from_mmap(mm, batch_indices, sample_size)
-
-            batch_x = array.array('f', [0.0] * (actual_batch_size * input_size))
-            batch_y = array.array('f', [0.0] * (actual_batch_size * output_size))
-
-            for j in range(actual_batch_size):
-                start = j * sample_size
-                batch_x[j*input_size:(j+1)*input_size] = batch_data[start:start+input_size]
-                batch_y[j*output_size:(j+1)*output_size] = batch_data[start+input_size:start+sample_size]
-
+            batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
             x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
             y = Tensor(batch_y, shape=(actual_batch_size, output_size))
 
@@ -175,7 +164,6 @@ def train():
             # Clear graph refs to avoid memory leak
             loss._prev.clear()
             pred._prev.clear()
-            x._prev.clear()
 
             total_loss += loss.data[0]
             correct += accuracy(pred, y) * actual_batch_size

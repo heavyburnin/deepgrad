@@ -8,8 +8,7 @@ lib.zero_float_array.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_size_t
 _zero_buf = {}
 
 class SGD:
-    
-    def __init__(self, parameters, lr=0.001):
+    def __init__(self, parameters, lr=0.01):
         self.parameters = parameters
         self.lr = lr
 
@@ -23,17 +22,6 @@ class SGD:
                     len(param.data),
                     ctypes.c_float(self.lr)
                 )
-
-    def zero_grad_back(self):
-        for param in self.parameters:
-            if param.requires_grad and param.grad:
-                param.grad = array.array('f', [0.0] * len(param.grad))
-
-    def zero_grad_c(self):
-        for param in self.parameters:
-            if param.requires_grad and param.grad:
-                ptr = (ctypes.c_float * len(param.grad)).from_buffer(param.grad)
-                lib.zero_float_array(ptr, len(param.grad))
 
     def zero_grad(self):
         for param in self.parameters:

@@ -59,12 +59,11 @@ deepgrad/
 └── train.py – Example training script
 ```
 
----
-
 🧩 The C backend is assumed to be built at:
 
 - `../simd-backend/build/libsimd_tensor_backend.so`
 
+---
 
 ## 📦 Install for Development
 To avoid import and path issues later, install DeepGrad as an editable package:

@@ -149,7 +149,7 @@ def train():
             loss = pred.cross_entropy(y)
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad_c()
 
             # Clear graph refs to avoid memory leak
             loss._prev.clear()

@@ -48,27 +48,24 @@ A lightweight, low-level tensor library for building and training neural network
 ---
 
 ## 🛠️ Project Organization
-    ```bash
-    deepgrad/
-    ├── tensor.py – Core Tensor class + ops
-    ├── ops.py – Operator registry (forward/backward function names)
-    ├── backend.py – ctypes bindings to libsimd_tensor_backend.so
-    ├── utils.py – Pure-Python helper functions
-    └── examples/
-    ├── model.py – Model definitions (e.g. MLP)
-    └── train.py – Example training script
-    ```
+```bash
+deepgrad/
+├── tensor.py – Core Tensor class + ops
+├── ops.py – Operator registry (forward/backward function names)
+├── backend.py – ctypes bindings to libsimd_tensor_backend.so
+├── utils.py – Pure-Python helper functions
+└── examples/
+├── model.py – Model definitions (e.g. MLP)
+└── train.py – Example training script
+```
 
 
 🧩 The C backend is assumed to be built at:
 
-`../simd-backend/build/libsimd_tensor_backend.so`
+- `../simd-backend/build/libsimd_tensor_backend.so`
 
 
 ## 📦 Install for Development
-
----
-
 To avoid import and path issues later, install DeepGrad as an editable package:
 
 1. Create a `setup.py` or add a `pyproject.toml`

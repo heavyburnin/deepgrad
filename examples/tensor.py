@@ -1,95 +1,8 @@
-import ctypes
-import os
 import array
 from functools import lru_cache
-
-# Set up C library interface
-SimdTensorBackend = ctypes.cdll.LoadLibrary(os.path.abspath("../build/libsimd_tensor_backend.so"))
-
-# Define types
-c_float_p = ctypes.POINTER(ctypes.c_float)
-c_size_t_p = ctypes.POINTER(ctypes.c_size_t)
-c_float = ctypes.c_float
-c_size_t = ctypes.c_size_t
-c_bool = ctypes.c_bool
-c_int = ctypes.c_int
-
-# Define function signatures
-function_signatures = {
-    'tensor_ops_init': ([], c_int),
-
-    'sanitize_gradients': ([c_float_p, c_size_t], None),
-    'sgd_update_inplace': ([c_float_p, c_float_p, c_size_t, c_float_p], None),
-
-    # Basic tensor operations
-    **{f'tensor_{op}': ([c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None)
-       for op in ['add', 'sub', 'mul', 'div']},
-
-    # Gradients for tensor operations
-    **{f'tensor_{op}_grad': ([c_float_p, c_float_p, c_float_p, c_float_p, c_float_p, c_size_t, c_size_t], None)
-       for op in ['add', 'sub', 'mul', 'div']},
-       
-    'tensor_relu': ([c_float_p, c_float_p, c_size_t], None),
-    'tensor_relu_backward': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
-
-    'tensor_matmul': ( [c_int, c_float_p, c_float_p, c_float_p, c_float_p,
-                        c_float_p, c_size_t, c_size_t, c_size_t,c_size_t, c_bool], None),
- 
-    'tensor_softmax_ce': ([c_float_p, c_float_p, c_float_p, c_float_p,
-                           c_float_p, c_float_p, c_size_t, c_size_t], None),
-
-    'tensor_sum': ([c_float_p, c_size_t], c_float),
-    'tensor_mean': ([c_float_p, c_size_t], c_float),
-    
-    'tensor_broadcast_row': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
-    'tensor_broadcast_col': ([c_float_p, c_float_p, c_size_t, c_size_t], None),
-    'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p, c_size_t_p,
-                                      c_size_t, c_size_t, c_size_t], None),
-
-    'tensor_add_inplace': ([c_float_p, c_float_p, c_size_t], None),
-    'tensor_fill_inplace': ([c_float_p, c_float, c_size_t], None),
-    'zero_float_array': ([c_float_p, c_size_t], None),
-
-}
-
-# Set function signatures
-for func_name, (argtypes, restype) in function_signatures.items():
-    func = getattr(SimdTensorBackend, func_name)
-    func.argtypes = argtypes
-    func.restype = restype
-
-OPS = {
-    'add': ('tensor_add', 'tensor_add_grad'),
-    'sub': ('tensor_sub', 'tensor_sub_grad'),
-    'mul': ('tensor_mul', 'tensor_mul_grad'),
-    'div': ('tensor_div', 'tensor_div_grad'),
-    # Add more ops here as needed
-}
-
-_broadcast_cache = {}
-
-def get_broadcast_cache_key(data, from_shape, to_shape):
-    return (id(data), from_shape, to_shape)
-
-_zero_buffer_pool = {}
-
-def get_zero_buffer(size, shared=False):
-    if size not in _zero_buffer_pool:
-        _zero_buffer_pool[size] = array.array('f', [0.0] * size)
-    else:
-        SimdTensorBackend.zero_float_array(
-            (c_float * size).from_buffer(_zero_buffer_pool[size]),
-            size
-        )
-    
-        if shared:
-            return _zero_buffer_pool[size]
-
-    # Return a copy to ensure isolation (still float32)
-    return array.array('f', _zero_buffer_pool[size])
-
-def buffer_from(g):
-    return (c_float * len(g)).from_buffer(g)
+from backend import SimdTensorBackend, c_float, c_size_t, c_int, c_bool, c_float_p, c_size_t_p
+from utils import get_zero_buffer, buffer_from, get_broadcast_cache_key, get_broadcasted, set_broadcasted, broadcast_to_shape
+from ops import get_op_names
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None):
@@ -217,45 +130,20 @@ class Tensor:
     
     @staticmethod
     def _broadcast_data(data, from_shape, to_shape):
-        # Fast path: no-op broadcast
+        """
+        Broadcasts the data from from_shape to to_shape using NumPy-style rules.
+        """
         if from_shape == to_shape:
             return data
 
-        # Fast path: scalar to anything
-        if from_shape == (1,) or len(from_shape) == 0:
-            size = 1
-            for dim in to_shape:
-                size *= dim
-            return array.array('f', data * size)
+        key = get_broadcast_cache_key(data, from_shape, to_shape)
+        cached = get_broadcasted(key)
+        if cached is not None:
+            return cached
 
-        key = (id(data), from_shape, to_shape)
-        if key in _broadcast_cache:
-            return _broadcast_cache[key]
-
-        # Only 2D broadcast supported via C
-        if len(from_shape) == 2 and len(to_shape) == 2:
-            B, N = to_shape
-            result = get_zero_buffer(B * N, shared=False)
-
-            if from_shape[0] == 1 and from_shape[1] == N:
-                SimdTensorBackend.tensor_broadcast_row(
-                    buffer_from(data),
-                    buffer_from(result),
-                    B, N
-                )
-            elif from_shape[1] == 1 and from_shape[0] == B:
-                SimdTensorBackend.tensor_broadcast_col(
-                    buffer_from(data),
-                    buffer_from(result),
-                    B, N
-                )
-            else:
-                raise NotImplementedError(f"Unsupported 2D broadcast from {from_shape} to {to_shape}")
-
-            _broadcast_cache[key] = result
-            return result
-
-        raise NotImplementedError(f"Unsupported broadcast from {from_shape} to {to_shape}")
+        result = broadcast_to_shape(data, from_shape, to_shape)
+        set_broadcasted(key, result)
+        return result
 
     def _unbroadcast_grad(self, grad, shape):
         grad_shape = self.shape
@@ -407,9 +295,7 @@ class Tensor:
         return out
 
     def binary_op(self, other, op_name):
-        if op_name not in OPS:
-            raise ValueError(f"Unsupported op: {op_name}")
-        forward_fn, backward_fn = OPS[op_name]
+        forward_fn, backward_fn = get_op_names(op_name)
         return self._apply_op(other, forward_fn, backward_fn)
 
     def __add__(self, other): return self.binary_op(other, 'add')

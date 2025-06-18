@@ -1,21 +1,70 @@
-# CSV to .bin conversion (run once)
-def convert_csv_to_bin(csv_path, bin_path):
-    with open(csv_path, 'r') as f_csv, open(bin_path, 'wb') as f_bin:
-        next(f_csv)  # Skip header
-        for line in f_csv:
-            values = list(map(float, line.strip().split(',')))
-            label_idx = int(values[0])
-            one_hot = [0.0] * 10
-            one_hot[label_idx] = 1.0
-            image = values[1:]  # 784 values
-            sample = image + one_hot  # total: 784 + 10
-            f_bin.write(struct.pack(f'{len(sample)}f', *sample))
+import array
+from backend import SimdTensorBackend, c_float
 
-def load_bin_dataset(bin_path, num_samples, sample_size):
-    data = []
-    with open(bin_path, 'rb') as f:
-        for _ in range(num_samples):
-            raw = f.read(sample_size * 4)
-            sample = list(struct.unpack(f'{sample_size}f', raw))
-            data.append(sample)
-    return data
+_zero_buffer_pool = {}
+_broadcast_cache = {}
+
+def get_zero_buffer(size, shared=False):
+    if size not in _zero_buffer_pool:
+        _zero_buffer_pool[size] = array.array('f', [0.0] * size)
+    else:
+        SimdTensorBackend.zero_float_array(
+            (c_float * size).from_buffer(_zero_buffer_pool[size]),
+            size
+        )
+
+        if shared:
+            return _zero_buffer_pool[size]
+
+    return array.array('f', _zero_buffer_pool[size])
+
+def buffer_from(g):
+    return (c_float * len(g)).from_buffer(g)
+
+def get_broadcast_cache_key(data, from_shape, to_shape):
+    return (id(data), from_shape, to_shape)
+
+def get_broadcasted(key):
+    return _broadcast_cache.get(key)
+
+def set_broadcasted(key, value):
+    _broadcast_cache[key] = value
+
+def broadcast_to_shape(data, from_shape, to_shape):
+    if from_shape == to_shape:
+        return data
+
+    rank_diff = len(to_shape) - len(from_shape)
+    from_shape = (1,) * rank_diff + from_shape
+
+    # Compute total size
+    out_size = 1
+    for dim in to_shape:
+        out_size *= dim
+
+    # Allocate and fill output buffer
+    out = array.array('f', [0.0] * out_size)
+
+    # Index traversal over broadcasted shape
+    for out_idx in range(out_size):
+        # Compute N-D index
+        idx = []
+        stride = out_size
+        for dim in to_shape:
+            stride //= dim
+            idx.append((out_idx // stride) % dim)
+
+        # Map to source index
+        src_idx = 0
+        stride = 1
+        for i in reversed(range(len(to_shape))):
+            dim = from_shape[i]
+            if dim == 1:
+                continue  # broadcasted dim
+            idx_val = idx[i]
+            stride *= dim
+            src_idx = src_idx * dim + idx_val
+
+        out[out_idx] = data[src_idx % len(data)]
+
+    return out

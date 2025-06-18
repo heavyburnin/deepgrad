@@ -1,6 +1,6 @@
 # DeepGrad
 
-A lightweight, low-level tensor library for building and training neural networks in Python, with optional C‑SIMD acceleration.
+A lightweight, low-level tensor library for building and training neural networks in Python, with C‑SIMD acceleration.
 
 ---
 
@@ -10,7 +10,7 @@ A lightweight, low-level tensor library for building and training neural network
 - **Gradient tracking & backprop**: `.backward()`, `.detach()`, `.requires_grad_()`
 - **Broadcasting**: full support for NumPy-style broadcasting in Python
 - **Optimizers**: built-in SGD
-- **Device support**: CPU backend (via C/SIMD) with scaffolding for future GPU extensions
+- **Device support**: CPU backend (via C/SIMD)
 - **Examples**: includes an MLP training script on MNIST-like data
 
 ---
@@ -26,7 +26,7 @@ A lightweight, low-level tensor library for building and training neural network
     pip install -r requirements.txt
     ```
 
-2. **Build the C backend** (if you want SIMD acceleration):
+2. **Build the C backend**:
     ```bash
     cd ../simd-backend
     mkdir -p build && cd build

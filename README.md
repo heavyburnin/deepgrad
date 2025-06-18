@@ -11,7 +11,7 @@ A lightweight, low-level tensor library for building and training neural network
 - **Broadcasting**: full support for NumPy-style broadcasting in Python
 - **Optimizers**: built-in SGD
 - **Device support**: CPU backend (via C/SIMD)
-- **Examples**: includes an MLP training script on MNIST-like data
+- **Examples**: includes an MLP training script on MNIST dataset
 
 ---
 

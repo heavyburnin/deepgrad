@@ -59,6 +59,7 @@ deepgrad/
 └── train.py – Example training script
 ```
 
+---
 
 🧩 The C backend is assumed to be built at:
 

@@ -1,4 +1,4 @@
-import array
+from array import array
 from functools import lru_cache
 from deepgrad.backend import SimdTensorBackend, c_float, c_size_t
 from deepgrad.utils import get_zero_buffer, buffer_from, get_broadcast_cache_key, get_broadcasted, set_broadcasted, broadcast_to_shape
@@ -26,71 +26,25 @@ class Tensor:
 
         assert len(self.data) == expected_size, f"Shape {self.shape} incompatible with data length {len(self.data)}"
 
-    def backward(self):
-        visited = set()
-        topo = []
-        
-        def build_topo(t):
-            if t not in visited:
-                visited.add(t)
-                for p in t._prev:
-                    build_topo(p)
-                topo.append(t)
-        
-        build_topo(self)
-        
-        for t in topo:
-            if t.requires_grad:
-                if t._grad is None:
-                    t._grad = get_zero_buffer(len(t.data), shared=False)
-                else:
-                    SimdTensorBackend.zero_float_array(
-                        buffer_from(t._grad),
-                        len(t._grad)
-                    )
-        
-        if self.shape != (1,) and not (len(self.shape) == 0 or self.shape == ()):
-            raise RuntimeError(
-                f"Cannot call backward on non-scalar tensor with shape {self.shape}. "
-                "Call `.sum().backward()` or pass an explicit gradient instead."
-            )
-
-        SimdTensorBackend.tensor_fill_inplace(
-            buffer_from(self.grad),
-            c_float(1.0),
-            c_size_t(len(self.grad)))
-        
-        for t in reversed(topo):
-            if t._backward is not None:
-                t._backward()
-                # t.sanitize_gradients()
-                
-        shape = self.shape
-        ndim = len(shape)
-        strides = [1] * ndim
-        for i in reversed(range(ndim - 1)):
-            strides[i] = strides[i + 1] * shape[i + 1]
-        self.strides = tuple(strides)
-
     def __getstate__(self):
         state = self.__dict__.copy()
 
-        if 'data' in state and isinstance(state['data'], array.array):
+        if 'data' in state and isinstance(state['data'], array):
             state['data'] = list(state['data'])
 
         if '_grad' in state and state['_grad'] is not None:
-            if isinstance(state['_grad'], array.array):
+            if isinstance(state['_grad'], array):
                 state['_grad'] = list(state['_grad'])
 
         return state
 
     def __setstate__(self, state):
         if 'data' in state and isinstance(state['data'], list):
-            state['data'] = array.array('f', state['data'])
+            state['data'] = array('f', state['data'])
 
         if '_grad' in state and state['_grad'] is not None:
             if isinstance(state['_grad'], list):
-                state['_grad'] = array.array('f', state['_grad'])
+                state['_grad'] = array('f', state['_grad'])
 
         self.__dict__.update(state)
 
@@ -153,7 +107,7 @@ class Tensor:
             # Right-align shapes for broadcasting
             shape = (1,) * (ndim - len(shape)) + shape
 
-        grad_arr = array.array('f', grad)
+        grad_arr = array('f', grad)
         
         # Calculate sizes directly without reduce
         grad_sz = 1
@@ -365,7 +319,7 @@ class Tensor:
             False
         )
 
-        out = Tensor(array.array('f', out_data), requires_grad=self.requires_grad or other.requires_grad, shape=out_shape)
+        out = Tensor(array('f', out_data), requires_grad=self.requires_grad or other.requires_grad, shape=out_shape)
 
         if out.requires_grad:
             def _backward():
@@ -475,7 +429,7 @@ class Tensor:
                 if self.requires_grad:
                     grad_val = out.grad[0] / len(self.data)
 
-                    # grad_array = array.array('f', [grad_val] * len(self.grad))
+                    # grad_array = array('f', [grad_val] * len(self.grad))
                     grad_array = get_zero_buffer(len(self.grad), shared=False)
                     for i in range(len(grad_array)):
                         grad_array[i] = grad_val
@@ -502,7 +456,7 @@ class Tensor:
                 if self.requires_grad:
                     grad_val = out.grad[0]
 
-                # grad_array = array.array('f', [grad_val] * len(self.grad))
+                # grad_array = array('f', [grad_val] * len(self.grad))
 
                 grad_array = get_zero_buffer(len(self.grad), shared=False)
                 for i in range(len(grad_array)):
@@ -518,6 +472,56 @@ class Tensor:
             out._prev = [self]
 
         return out
+
+    def backward(self):
+        visited = set()
+        topo = []
+        
+        def build_topo(t):
+            if t not in visited:
+                visited.add(t)
+                for p in t._prev:
+                    build_topo(p)
+                topo.append(t)
+        
+        build_topo(self)
+        
+        for t in topo:
+            if t.requires_grad:
+                if t._grad is None:
+                    t._grad = get_zero_buffer(len(t.data), shared=False)
+                else:
+                    if len(t._grad) < 64:
+                        for i in range(len(t._grad)):
+                            t._grad[i] = 0.0
+                    else:
+                        SimdTensorBackend.zero_float_array(
+                            buffer_from(t._grad),
+                            len(t._grad)
+                        )
+        
+        if self.shape != (1,) and not (len(self.shape) == 0 or self.shape == ()):
+            raise RuntimeError(
+                f"Cannot call backward on non-scalar tensor with shape {self.shape}. "
+                "Call `.sum().backward()` or pass an explicit gradient instead."
+            )
+
+        SimdTensorBackend.tensor_fill_inplace(
+            buffer_from(self.grad),
+            c_float(1.0),
+            c_size_t(len(self.grad)))
+        
+        for t in reversed(topo):
+            if t._backward is not None:
+                t._backward()
+                # t.sanitize_gradients()
+                
+        shape = self.shape
+        ndim = len(shape)
+        strides = [1] * ndim
+        for i in reversed(range(ndim - 1)):
+            strides[i] = strides[i + 1] * shape[i + 1]
+        self.strides = tuple(strides)
 
     def __repr__(self):
         return f"Tensor(shape={self.shape}, data={list(self.data)}, grad={list(self.grad) if self.grad else None})"

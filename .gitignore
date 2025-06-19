@@ -8,3 +8,4 @@ __pycache__
 simd-backend/build/
 deepgrad/__pycache__
 deepgrad/examples/__pycache__
+deepgrad/examples/llm

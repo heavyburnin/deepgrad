@@ -4,7 +4,7 @@ import dill
 from deepgrad.examples.model import MLP
 from deepgrad.examples.optimizer import SGD
 from tqdm import tqdm
-import array
+from array import array
 import mmap
 import cProfile
 import pstats
@@ -17,10 +17,10 @@ def convert_csv_to_bin(csv_path, bin_path):
             values = line.strip().split(',')
             label_idx = int(values[0])
 
-            one_hot = array.array('f', (0.0 for _ in range(10)))
+            one_hot = array('f', (0.0 for _ in range(10)))
             one_hot[label_idx] = 1.0
 
-            image = array.array('f', (float(px) / 255.0 for px in values[1:]))
+            image = array('f', (float(px) / 255.0 for px in values[1:]))
 
             sample = image + one_hot  # array supports concatenation
 
@@ -41,14 +41,14 @@ def load_bin_dataset(bin_path, num_samples, sample_size):
 def build_batch_from_mmap(mm, sample_indices, input_size, output_size):
     sample_size = input_size + output_size
     sample_bytes = sample_size * 4
-    x_array = array.array('f')
-    y_array = array.array('f')
+    x_array = array('f')
+    y_array = array('f')
 
     for sample_idx in sample_indices:
         offset = sample_idx * sample_bytes
         raw = mm[offset : offset + sample_bytes]
 
-        sample = array.array('f')
+        sample = array('f')
         sample.frombytes(raw)
 
         x_array.extend(sample[:input_size])

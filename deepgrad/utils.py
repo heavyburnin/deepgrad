@@ -1,4 +1,4 @@
-import array
+from array import array
 from deepgrad.backend import SimdTensorBackend, c_float
 
 _zero_buffer_pool = {}
@@ -6,7 +6,7 @@ _broadcast_cache = {}
 
 def get_zero_buffer(size, shared=False):
     if size not in _zero_buffer_pool:
-        _zero_buffer_pool[size] = array.array('f', [0.0] * size)
+        _zero_buffer_pool[size] = array('f', [0.0] * size)
     else:
         SimdTensorBackend.zero_float_array(
             (c_float * size).from_buffer(_zero_buffer_pool[size]),
@@ -16,7 +16,7 @@ def get_zero_buffer(size, shared=False):
         if shared:
             return _zero_buffer_pool[size]
 
-    return array.array('f', _zero_buffer_pool[size])
+    return array('f', _zero_buffer_pool[size])
 
 def buffer_from(g):
     return (c_float * len(g)).from_buffer(g)
@@ -43,7 +43,7 @@ def broadcast_to_shape(data, from_shape, to_shape):
         out_size *= dim
 
     # Allocate and fill output buffer
-    out = array.array('f', [0.0] * out_size)
+    out = array('f', [0.0] * out_size)
 
     # Index traversal over broadcasted shape
     for out_idx in range(out_size):

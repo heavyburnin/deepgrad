@@ -1,4 +1,4 @@
-// tensor_ops.c
+// tensor_avx_init.c
 
 #include "tensor_avx_init.h"
 #include <stdio.h>      // fprintf

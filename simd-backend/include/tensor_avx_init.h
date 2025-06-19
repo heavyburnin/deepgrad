@@ -1,11 +1,15 @@
-// tensor_ops.h
+// tensor_avx_init.h
 
-#ifndef TENSOR_OPS_H
-#define TENSOR_OPS_H
+#ifndef TENSOR_AVX_INIT_H
+#define TENSOR_AVX_INIT_H
 
 #include <stddef.h>
 #include <stdbool.h>
 
+// Check AVX2 hardware support
+int has_avx2(void);
+
+// Initialize the SIMD tensor backend (threads, AVX checks)
 int tensor_ops_init(void);
 
-#endif // TENSOR_OPS_H
+#endif // TENSOR_AVX_INIT_H

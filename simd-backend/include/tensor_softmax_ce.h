@@ -5,7 +5,7 @@
 #include <stdbool.h> // for bool
 
 // You can define this in the header or externally as a compile-time constant
-#define MAX_CLASSES 4096
+#define MAX_CLASSES 1024
 
 // Softmax + cross-entropy + gradient (fused)
 // - logits: [batch x class_count]

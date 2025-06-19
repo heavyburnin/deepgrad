@@ -1,6 +1,6 @@
 // tensor_ops.c
 
-#include "../include/tensor_ops.h"
+#include "tensor_avx_init.h"
 #include <stdio.h>      // fprintf
 #include <cpuid.h>      // __get_cpuid_count, bit_AVX2
 #include <omp.h>        // OpenMP: omp_get_num_procs, omp_set_num_threads

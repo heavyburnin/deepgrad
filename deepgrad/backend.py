@@ -41,13 +41,10 @@ function_signatures = {
     'tensor_sum': ([c_float_p, c_size_t], c_float),
     'tensor_mean': ([c_float_p, c_size_t], c_float),
     
-    'broadcast_to_shape': (
-        [c_float_p, c_int_p, c_int_p, c_size_t, c_size_t, c_size_t, c_float_p],
-        None
-    ),
+    'broadcast_to_shape': ([c_float_p, c_int_p, c_int_p, c_size_t, c_size_t, c_size_t, c_float_p], None),
     
     'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p, c_size_t_p,
-                                      c_size_t, c_size_t, c_size_t], None),
+                                     c_size_t, c_size_t, c_size_t], None),
 
     'tensor_add_inplace': ([c_float_p, c_float_p, c_size_t], None),
     'tensor_fill_inplace': ([c_float_p, c_float, c_size_t], None),
@@ -60,9 +57,3 @@ for func_name, (argtypes, restype) in function_signatures.items():
     func = getattr(SimdTensorBackend, func_name)
     func.argtypes = argtypes
     func.restype = restype
-
-__all__ = [
-    "SimdTensorBackend",
-    "c_float", "c_size_t", "c_int", "c_bool",
-    "c_float_p", "c_size_t_p"
-]

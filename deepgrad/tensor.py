@@ -297,10 +297,10 @@ class Tensor:
         # Forward pass
         SimdTensorBackend.tensor_matmul(
             0,  # MATMUL_FORWARD
-            (c_float * self.size).from_buffer(self.data),
-            (c_float * other.size).from_buffer(other.data),
+            self.data,
+            other.data,
             None,           # grad_out (unused)
-            (c_float * out_size).from_buffer(out_data),
+            out_data,
             None,           # grad_B (unused)
             batch,
             M, K, N,
@@ -320,8 +320,8 @@ class Tensor:
 
                 SimdTensorBackend.tensor_matmul(
                     1,  # MATMUL_BACKWARD
-                    (c_float * self.size).from_buffer(self.data),
-                    (c_float * other.size).from_buffer(other.data),
+                    self.data,
+                    other.data,
                     out.grad,
                     grad_A,
                     grad_B,

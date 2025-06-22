@@ -11,6 +11,7 @@ c_float = ctypes.c_float
 c_size_t = ctypes.c_size_t
 c_bool = ctypes.c_bool
 c_int = ctypes.c_int
+c_int_p = ctypes.POINTER(ctypes.c_int)
 
 # Define function signatures
 function_signatures = {
@@ -39,6 +40,11 @@ function_signatures = {
 
     'tensor_sum': ([c_float_p, c_size_t], c_float),
     'tensor_mean': ([c_float_p, c_size_t], c_float),
+    
+    'broadcast_to_shape': (
+        [c_float_p, c_int_p, c_int_p, c_size_t, c_size_t, c_size_t, c_float_p],
+        None
+    ),
     
     'tensor_unbroadcast_sum_axes': ([c_float_p, c_float_p, c_size_t_p, c_size_t_p, c_size_t_p,
                                       c_size_t, c_size_t, c_size_t], None),

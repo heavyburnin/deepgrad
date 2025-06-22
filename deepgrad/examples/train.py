@@ -1,14 +1,15 @@
 import random
 import os
 import dill
-from deepgrad.examples.model import MLP
-from deepgrad.examples.optimizer import SGD
+import mmap
 from tqdm import tqdm
 from array import array
-import mmap
+from ctypes import c_float, POINTER, sizeof, cast, memmove, addressof, byref
+from deepgrad.tensor import Tensor
+from deepgrad.examples.model import MLP
+from deepgrad.examples.optimizer import SGD
 import cProfile
 import pstats
-from deepgrad.tensor import Tensor
 
 def convert_csv_to_bin(csv_path, bin_path):
     with open(csv_path, 'r') as f_csv, open(bin_path, 'wb') as f_bin:
@@ -41,18 +42,32 @@ def load_bin_dataset(bin_path, num_samples, sample_size):
 def build_batch_from_mmap(mm, sample_indices, input_size, output_size):
     sample_size = input_size + output_size
     sample_bytes = sample_size * 4
-    x_array = array('f')
-    y_array = array('f')
+    batch_size = len(sample_indices)
 
-    for sample_idx in sample_indices:
+    total_input = batch_size * input_size
+    total_output = batch_size * output_size
+
+    x_array = (c_float * total_input)()
+    y_array = (c_float * total_output)()
+
+    buf = (c_float * sample_size)()  # reusable temp buffer
+
+    for i, sample_idx in enumerate(sample_indices):
         offset = sample_idx * sample_bytes
         raw = mm[offset : offset + sample_bytes]
 
-        sample = array('f')
-        sample.frombytes(raw)
+        # copy raw bytes into float buffer
+        memmove(buf, raw, sample_bytes)
 
-        x_array.extend(sample[:input_size])
-        y_array.extend(sample[input_size:])
+        # destination pointers
+        x_ptr = cast(addressof(x_array) + (i * input_size * sizeof(c_float)), POINTER(c_float))
+        y_ptr = cast(addressof(y_array) + (i * output_size * sizeof(c_float)), POINTER(c_float))
+
+        # copy input
+        memmove(x_ptr, buf, input_size * sizeof(c_float))
+
+        # copy output (now fixed)
+        memmove(y_ptr, byref(buf, input_size * sizeof(c_float)), output_size * sizeof(c_float))
 
     return x_array, y_array
 
@@ -97,8 +112,12 @@ def evaluate(model, test_path='deepgrad/examples/mnist_test.bin'):
         batch_indices = list(range(i, i + actual_batch_size))
 
         batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
-        x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
-        y = Tensor(batch_y, shape=(actual_batch_size, output_size))
+
+        x_size = actual_batch_size * input_size
+        y_size = actual_batch_size * output_size
+
+        x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size), size=x_size)
+        y = Tensor(batch_y, shape=(actual_batch_size, output_size), size=y_size)
 
         pred = model(x)
         loss = pred.cross_entropy(y)
@@ -142,8 +161,13 @@ def train():
             actual_batch_size = len(batch_indices)
 
             batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
-            x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size))
-            y = Tensor(batch_y, shape=(actual_batch_size, output_size))
+
+            # Compute sizes manually since `ctypes` pointers have no len()
+            x_size = actual_batch_size * input_size
+            y_size = actual_batch_size * output_size
+
+            x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size), size=x_size)
+            y = Tensor(batch_y, shape=(actual_batch_size, output_size), size=y_size)
 
             pred = model(x)
             loss = pred.cross_entropy(y)

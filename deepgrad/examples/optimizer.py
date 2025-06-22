@@ -1,7 +1,5 @@
-from deepgrad.backend import SimdTensorBackend, c_float
-from deepgrad.utils import get_zero_buffer, buffer_from
-
-_zero_buf = {}
+from deepgrad.backend import SimdTensorBackend
+from ctypes import c_float
 
 class SGD:
     def __init__(self, parameters, lr=0.01):
@@ -9,27 +7,19 @@ class SGD:
         self.lr = lr
 
     def step(self):
-        for param in self.parameters:   
-                # Then apply SGD update in-place
+        for param in self.parameters:
+            if param.grad is not None:
                 SimdTensorBackend.sgd_update_inplace(
-                    buffer_from(param.data),
-                    buffer_from(param.grad),
-                    len(param.data),
+                    param.data,
+                    param.grad,
+                    param.size,
                     c_float(self.lr)
                 )
 
     def zero_grad_c(self):
         for param in self.parameters:
-            if param.requires_grad and param.grad:
+            if param.requires_grad and param.grad is not None:
                 SimdTensorBackend.zero_float_array(
-                    buffer_from(param.grad),
-                    len(param.grad)
+                    param.grad,
+                    param.size
                 )
-
-    def zero_grad(self):
-        for param in self.parameters:
-            if param.requires_grad and param.grad:
-                n = len(param.grad)
-                if n not in _zero_buf:
-                    _zero_buf[n] = get_zero_buffer(n, shared=False)
-                param.grad[:] = _zero_buf[n]

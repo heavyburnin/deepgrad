@@ -21,4 +21,14 @@ void tensor_unbroadcast_sum_axes(
     size_t total_out            // total size of out
 );
 
+void broadcast_to_shape(
+    const float* data,
+    const int* from_shape,
+    const int* to_shape,
+    int ndim_from,
+    int ndim_to,
+    int from_size,
+    float* out
+);
+
 #endif // TENSOR_BROADCAST_H

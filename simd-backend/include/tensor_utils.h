@@ -6,18 +6,6 @@
 #include <immintrin.h>  // For __m256, __m128, intrinsics
 #include <stddef.h>     // For size_t
 
-// Horizontal sum of 8-float AVX vector
-float hsum256_ps(__m256 v);
-
-// Horizontal max of 8-float AVX vector
-float hmax256_ps(__m256 v);
-
-// Natural log (ln) approximation of 8-float AVX vector
-__m256 log256_ps(__m256 x);
-
-// Exponential approximation of 8-float AVX vector
-__m256 exp256_ps(__m256 x);
-
 // Aligned memory utility
 float* get_cached_buffer(float** buf, size_t* current_size, size_t required_size);
 

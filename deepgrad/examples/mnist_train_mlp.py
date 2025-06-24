@@ -6,8 +6,8 @@ from tqdm import tqdm
 from array import array
 from ctypes import c_float, POINTER, cast, memmove, addressof
 from deepgrad.tensor import Tensor
-from deepgrad.examples.model import MLP, ConvNet
-from deepgrad.examples.optimizer import SGD
+from deepgrad.model import MLP
+from deepgrad.optimizer import SGD
 import cProfile
 import pstats
 
@@ -86,7 +86,7 @@ def accuracy(pred, target):
     
     return correct / batch_size
 
-def evaluate(model, test_path='deepgrad/examples/mnist_test.bin'):
+def evaluate(model, test_path='deepgrad/examples/datasets/mnist_test.bin'):
     input_size = 784
     output_size = 10
     sample_size = input_size + output_size
@@ -135,9 +135,9 @@ def train():
 
     model = MLP(input_size, hidden1, hidden2, output_size)
     # model = ConvNet()
-    optimizer = SGD(model.parameters(), lr=0.01)
+    optimizer = SGD(model.parameters(), lr=0.05)
 
-    mm, num_samples, _ = load_bin_dataset('deepgrad/examples/mnist_train.bin', 60000, sample_size)
+    mm, num_samples, _ = load_bin_dataset('deepgrad/examples/datasets/mnist_train.bin', 60000, sample_size)
 
     for epoch in range(num_epochs):
         total_loss = 0.0
@@ -186,13 +186,13 @@ def train():
         if epoch == num_epochs - 1:
             evaluate(model)
 
-    save_model(model, 'deepgrad/examples/model.pkl')
-    print("Model saved to model.pkl")
+    save_model(model, 'deepgrad/examples/mnist_model.pkl')
+    print("Model saved to mnist_model.pkl")
 
 if __name__ == '__main__':
-    if not os.path.exists('deepgrad/examples/mnist_train.bin') or not os.path.exists('deepgrad/examples/mnist_test.bin'):
-        convert_csv_to_bin('deepgrad/examples/mnist_train.csv', 'deepgrad/examples/mnist_train.bin')
-        convert_csv_to_bin('deepgrad/examples/mnist_test.csv', 'deepgrad/examples/mnist_test.bin')
+    if not os.path.exists('deepgrad/examples/datasets/mnist_train.bin') or not os.path.exists('deepgrad/examples/datasets/mnist_test.bin'):
+        convert_csv_to_bin('deepgrad/examples/datasets/mnist_train.csv', 'deepgrad/examples/datasets/mnist_train.bin')
+        convert_csv_to_bin('deepgrad/examples/datasets/mnist_test.csv', 'deepgrad/examples/datasets/mnist_test.bin')
     else:
         print("Binary file already exists. Skipping conversion.")
 

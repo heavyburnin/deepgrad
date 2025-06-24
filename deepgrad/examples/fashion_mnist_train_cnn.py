@@ -1,0 +1,199 @@
+import random
+import os
+import dill
+import mmap
+from tqdm import tqdm
+from array import array
+from ctypes import c_float, POINTER, cast, memmove, addressof
+from deepgrad.tensor import Tensor
+from deepgrad.model import ConvNet
+from deepgrad.optimizer import SGD
+import cProfile
+import pstats
+
+def convert_csv_to_bin(csv_path, bin_path):
+    with open(csv_path, 'r') as f_csv, open(bin_path, 'wb') as f_bin:
+        next(f_csv)  # skip header
+        for line in f_csv:
+            values = line.strip().split(',')
+            label_idx = int(values[0])
+
+            one_hot = array('f', (0.0 for _ in range(10)))
+            one_hot[label_idx] = 1.0
+
+            image = array('f', (float(px) / 255.0 for px in values[1:]))
+
+            sample = image + one_hot  # array supports concatenation
+
+            f_bin.write(sample.tobytes())
+
+def load_bin_dataset(bin_path, num_samples, sample_size):
+    with open(bin_path, 'rb') as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        actual_bytes = mm.size()
+        expected_bytes = num_samples * sample_size * 4
+
+        if actual_bytes < expected_bytes:
+            print(f"[WARN] File smaller than expected. Shrinking num_samples.")
+            num_samples = actual_bytes // (sample_size * 4)
+
+        return mm, num_samples, sample_size
+
+def build_batch_from_mmap(mm, sample_indices, input_size, output_size):
+    sample_size = input_size + output_size
+    sample_bytes = sample_size * 4
+    batch_size = len(sample_indices)
+
+    total_input = batch_size * input_size
+    total_output = batch_size * output_size
+
+    x_array = (c_float * total_input)()
+    y_array = (c_float * total_output)()
+
+    for i, sample_idx in enumerate(sample_indices):
+        offset = sample_idx * sample_bytes
+
+        # Copy input directly
+        x_ptr = cast(addressof(x_array) + (i * input_size * 4), POINTER(c_float))
+        memmove(x_ptr, mm[offset : offset + input_size * 4], input_size * 4)
+
+        # Copy output directly
+        y_ptr = cast(addressof(y_array) + (i * output_size * 4), POINTER(c_float))
+        memmove(y_ptr, mm[offset + input_size * 4 : offset + sample_bytes], output_size * 4)
+
+    return x_array, y_array
+
+def save_model(model, filepath):
+    with open(filepath, 'wb') as f:
+        dill.dump(model, f)
+
+def load_model(filepath):
+    with open(filepath, 'rb') as f:
+        return dill.load(f)
+
+def accuracy(pred, target):
+    logits = pred.data
+    targets = target.data
+    num_classes = 10
+    batch_size = len(logits) // num_classes
+
+    correct = 0
+    for j in range(batch_size):
+        pred_index = max(range(num_classes), key=lambda i: logits[j * num_classes + i])
+        true_index = max(range(num_classes), key=lambda i: targets[j * num_classes + i])
+        if pred_index == true_index:
+            correct += 1
+    
+    return correct / batch_size
+
+def evaluate(model, test_path='deepgrad/examples/datasets/fashion_mnist_test.bin'):
+    input_size = 784
+    output_size = 10
+    sample_size = input_size + output_size
+    batch_size = 32
+    num_samples = 10000
+
+    mm, num_samples, _ = load_bin_dataset(test_path, num_samples, sample_size)
+
+    total_loss = 0.0
+    correct = 0.0
+    total = 0
+
+    for i in range(0, num_samples, batch_size):
+        actual_batch_size = min(batch_size, num_samples - i)
+        batch_indices = list(range(i, i + actual_batch_size))
+
+        batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
+
+        x_size = actual_batch_size * input_size
+        y_size = actual_batch_size * output_size
+
+        x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, 1, 28, 28), size=x_size)
+        y = Tensor(batch_y, shape=(actual_batch_size, output_size), size=y_size)
+
+        pred = model(x)
+        loss = pred.cross_entropy(y)
+
+        total_loss += loss.data[0]
+        correct += accuracy(pred, y) * actual_batch_size
+        total += actual_batch_size
+
+    avg_loss = total_loss / total
+    acc = (correct / total) * 100
+    print(f"[Eval] Loss: {avg_loss:.4f} | Accuracy: {acc:.2f}%")
+
+    return avg_loss, acc
+
+def train():
+    input_size = 784
+    output_size = 10
+    batch_size = 32
+    num_epochs = 20
+    sample_size = input_size + output_size
+
+    model = ConvNet()
+    optimizer = SGD(model.parameters(), lr=0.01)
+
+    mm, num_samples, _ = load_bin_dataset('deepgrad/examples/datasets/fashion_mnist_train.bin', 60000, sample_size)
+
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        correct = 0.0
+        total = 0
+
+        indices = list(range(num_samples))
+        random.shuffle(indices)
+
+        progress = tqdm(range(0, num_samples, batch_size), desc=f"Epoch {epoch+1}/{num_epochs}", dynamic_ncols=False)
+
+        for i in progress:
+            batch_indices = indices[i:i+batch_size]
+            actual_batch_size = len(batch_indices)
+
+            batch_x, batch_y = build_batch_from_mmap(mm, batch_indices, input_size, output_size)
+
+            # Compute sizes manually since `ctypes` pointers have no len()
+            x_size = actual_batch_size * input_size
+            y_size = actual_batch_size * output_size
+
+            x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, 1, 28, 28), size=x_size)
+            y = Tensor(batch_y, shape=(actual_batch_size, output_size), size=y_size)
+
+            pred = model(x)
+            loss = pred.cross_entropy(y)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad_c()
+
+            # Clear graph refs to avoid memory leak
+            loss._prev.clear()
+            pred._prev.clear()
+
+            total_loss += loss.data[0]
+            correct += accuracy(pred, y) * actual_batch_size
+            total += actual_batch_size
+
+            if i % (batch_size * 25) == 0:
+                progress.set_postfix({
+                    "loss": total_loss / (total or 1),
+                    "acc": f"{(correct / total) * 100:.2f}%"
+                })
+
+        if epoch == num_epochs - 1:
+            evaluate(model)
+
+    save_model(model, 'deepgrad/examples/fashion_model.pkl')
+    print("Model saved to fashion_model.pkl")
+
+if __name__ == '__main__':
+    if not os.path.exists('deepgrad/examples/datasets/fashion_mnist_train.bin') or not os.path.exists('deepgrad/examples/datasets/fashion_mnist_test.bin'):
+        convert_csv_to_bin('deepgrad/examples/datasets/fashion_mnist_train.csv', 'deepgrad/examples/datasets/fashion_mnist_train.bin')
+        convert_csv_to_bin('deepgrad/examples/datasets/fashion_mnist_test.csv', 'deepgrad/examples/datasets/fashion_mnist_test.bin')
+    else:
+        print("Binary file already exists. Skipping conversion.")
+
+    with cProfile.Profile() as pr:
+        train()
+
+    stats = pstats.Stats(pr)
+    stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(20)

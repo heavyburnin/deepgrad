@@ -7,6 +7,7 @@
 #include <stdlib.h>      // For aligned_alloc, free
 #include <string.h>      // For memset
 #include <omp.h>         // For OpenMP
+#include <stdbool.h>
 
 // Efficient broadcasting of a single row [1, N] → [B, N]
 void tensor_broadcast_row(const float* input, float* output, size_t B, size_t N) {
@@ -64,30 +65,32 @@ void tensor_unbroadcast_sum_axes(
     const size_t* strides_out,
     size_t ndim,
     size_t total_grad,
-    size_t total_out
+    size_t total_out,
+    bool accumulate
 ) {
     // Initialize output to zero using vectorized operations
-    #pragma omp parallel
-    {
-        const size_t vec_size = 8; // AVX2 processes 8 floats at once
-        __m256 zero_vec = _mm256_setzero_ps();
-        
-        #pragma omp for
-        for (size_t i = 0; i < total_out - (total_out % vec_size); i += vec_size) {
-            _mm256_storeu_ps(&out[i], zero_vec);
-        }
-        
-        // Handle remaining elements
-        #pragma omp for
-        for (size_t i = total_out - (total_out % vec_size); i < total_out; ++i) {
-            out[i] = 0.0f;
+    if (!accumulate) {
+        #pragma omp parallel
+        {
+            const size_t vec_size = 8;
+            __m256 zero_vec = _mm256_setzero_ps();
+
+            #pragma omp for
+            for (size_t i = 0; i < total_out - (total_out % vec_size); i += vec_size) {
+                _mm256_storeu_ps(&out[i], zero_vec);
+            }
+
+            #pragma omp for
+            for (size_t i = total_out - (total_out % vec_size); i < total_out; ++i) {
+                out[i] = 0.0f;
+            }
         }
     }
 
     // Create thread-local buffers to avoid atomic operations
     #pragma omp parallel
     {
-        float* local_out = (float*)aligned_alloc(32, total_out * sizeof(float));
+        float* local_out = (float*)_mm_malloc(total_out * sizeof(float), 32);
         memset(local_out, 0, total_out * sizeof(float));
         
         #pragma omp for
@@ -120,7 +123,7 @@ void tensor_unbroadcast_sum_axes(
             }
         }
         
-        free(local_out);
+        _mm_free(local_out);
     }
 }
 

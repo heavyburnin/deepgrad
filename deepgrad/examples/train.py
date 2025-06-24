@@ -4,9 +4,9 @@ import dill
 import mmap
 from tqdm import tqdm
 from array import array
-from ctypes import c_float, POINTER, sizeof, cast, memmove, addressof, byref
+from ctypes import c_float, POINTER, cast, memmove, addressof
 from deepgrad.tensor import Tensor
-from deepgrad.examples.model import MLP
+from deepgrad.examples.model import MLP, ConvNet
 from deepgrad.examples.optimizer import SGD
 import cProfile
 import pstats
@@ -50,24 +50,16 @@ def build_batch_from_mmap(mm, sample_indices, input_size, output_size):
     x_array = (c_float * total_input)()
     y_array = (c_float * total_output)()
 
-    buf = (c_float * sample_size)()  # reusable temp buffer
-
     for i, sample_idx in enumerate(sample_indices):
         offset = sample_idx * sample_bytes
-        raw = mm[offset : offset + sample_bytes]
 
-        # copy raw bytes into float buffer
-        memmove(buf, raw, sample_bytes)
+        # Copy input directly
+        x_ptr = cast(addressof(x_array) + (i * input_size * 4), POINTER(c_float))
+        memmove(x_ptr, mm[offset : offset + input_size * 4], input_size * 4)
 
-        # destination pointers
-        x_ptr = cast(addressof(x_array) + (i * input_size * sizeof(c_float)), POINTER(c_float))
-        y_ptr = cast(addressof(y_array) + (i * output_size * sizeof(c_float)), POINTER(c_float))
-
-        # copy input
-        memmove(x_ptr, buf, input_size * sizeof(c_float))
-
-        # copy output (now fixed)
-        memmove(y_ptr, byref(buf, input_size * sizeof(c_float)), output_size * sizeof(c_float))
+        # Copy output directly
+        y_ptr = cast(addressof(y_array) + (i * output_size * 4), POINTER(c_float))
+        memmove(y_ptr, mm[offset + input_size * 4 : offset + sample_bytes], output_size * 4)
 
     return x_array, y_array
 
@@ -142,6 +134,7 @@ def train():
     sample_size = input_size + output_size
 
     model = MLP(input_size, hidden1, hidden2, output_size)
+    # model = ConvNet()
     optimizer = SGD(model.parameters(), lr=0.01)
 
     mm, num_samples, _ = load_bin_dataset('deepgrad/examples/mnist_train.bin', 60000, sample_size)
@@ -166,7 +159,8 @@ def train():
             x_size = actual_batch_size * input_size
             y_size = actual_batch_size * output_size
 
-            x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size), size=x_size)
+            # x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, 1, 28, 28), size=x_size) <-- CNN
+            x = Tensor(batch_x, requires_grad=True, shape=(actual_batch_size, input_size), size=x_size) # <-- MLP
             y = Tensor(batch_y, shape=(actual_batch_size, output_size), size=y_size)
 
             pred = model(x)

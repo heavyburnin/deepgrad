@@ -1,22 +1,43 @@
-import numpy as np
 from ctypes import c_float
 
 from deepgrad.tensor import Tensor
 
-# Create a ctypes float array with 3 elements
-data = (c_float * 3)(1.0, 2.0, 3.0)
+import random
 
-# Wrap it in a Tensor
-x = Tensor(data, requires_grad=True, shape=(3,), size=3)
+def zeros(shape, requires_grad=False):
+    size = 1
+    for dim in shape:
+        size *= dim
+    data = (c_float * size)(*([0.0] * size))
+    return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
-# Apply exponential
-y = x.exp()
+def ones(shape, requires_grad=False):
+    size = 1
+    for dim in shape:
+        size *= dim
+    data = (c_float * size)(*([1.0] * size))
+    return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
-print("Input x       :", list(x.data))
-print("exp(x) output :", list(y.data))
+def randn(shape, requires_grad=False, mean=0.0, std=1.0):
+    size = 1
+    for dim in shape:
+        size *= dim
+    # Box-Muller normal sampling
+    def normal():
+        u1, u2 = random.random(), random.random()
+        z0 = (2 * (-1) ** int(u1 * 2)) * (abs(2 * u1 - 1) ** 0.5) * ((-2 * math.log(u2)) ** 0.5)
+        return mean + std * z0
+    import math
+    data = (c_float * size)(*[random.gauss(mean, std) for _ in range(size)])
+    return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
-# Backprop on scalar sum
+x = randn((1, 3, 28, 28), requires_grad=True)
+w = randn((8, 3, 3, 3), requires_grad=True)
+b = zeros((8,), requires_grad=True)
+
+y = x.conv2d(w, b, stride=(1, 1), padding=(1, 1))
 y.sum().backward()
 
-print("x.grad        :", list(x.grad))
-print("Expected grad :", list(np.exp([1.0, 2.0, 3.0])))
+print(x.grad[:10])  # gradients for first 10 input pixels
+print(w.grad[:10])  # gradients for first 10 weights
+print(b.grad[:])    # gradient for each bias

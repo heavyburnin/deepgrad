@@ -1,7 +1,6 @@
-from functools import lru_cache
 from deepgrad.backend import SimdTensorBackend
-from ctypes import c_float, c_size_t
-from deepgrad.utils import get_broadcast_cache_key, get_broadcasted, set_broadcasted, broadcast_to_shape
+from ctypes import c_float, c_size_t, Array
+from deepgrad.broadcast import compute_broadcast_shape, broadcast_to_shape, unbroadcast_grad
 from deepgrad.ops import get_op_names
 
 class Tensor:
@@ -42,12 +41,12 @@ class Tensor:
         state = self.__dict__.copy()
 
         # Convert ctypes data buffer to list
-        if 'data' in state and hasattr(state['data'], '__len__') and isinstance(state['data'], (c_float * len(state['data']))):
+        if 'data' in state and hasattr(state['data'], '__len__') and isinstance(state['data'], Array):
             state['data'] = [state['data'][i] for i in range(len(state['data']))]
 
         # Convert ctypes grad buffer to list
         if '_grad' in state and state['_grad'] is not None:
-            if hasattr(state['_grad'], '__len__') and isinstance(state['_grad'], (c_float * len(state['_grad']))):
+            if hasattr(state['_grad'], '__len__') and isinstance(state['_grad'], Array):
                 state['_grad'] = [state['_grad'][i] for i in range(len(state['_grad']))]
 
         return state
@@ -72,101 +71,23 @@ class Tensor:
             return None
 
         if self._grad is None:
-            self._grad = (c_float * self.self)()  # freshly allocated zero buffer
+            self._grad = (c_float * self.size)()  # freshly allocated zero buffer
         return self._grad
 
     @grad.setter
     def grad(self, value):
         self._grad = value
 
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def _compute_broadcast_shape(shape1, shape2):
-        if len(shape1) != len(shape2):
-            raise ValueError(f"Only same-rank tensors supported for broadcasting (got {shape1} and {shape2})")
-            
-        out_shape = []
-        for dim1, dim2 in zip(shape1, shape2):
-            if dim1 == dim2:
-                out_shape.append(dim1)
-            elif dim1 == 1:
-                out_shape.append(dim2)
-            elif dim2 == 1:
-                out_shape.append(dim1)
-            else:
-                raise ValueError(f"Incompatible shapes for broadcasting: {shape1} and {shape2}")
-                
-        return tuple(out_shape)
-    
-    @staticmethod
-    def _broadcast_data(data, from_shape, to_shape):
-        """
-        Broadcasts the data from from_shape to to_shape using NumPy-style rules.
-        """
-        if from_shape == to_shape:
-            return data
-
-        key = get_broadcast_cache_key(data, from_shape, to_shape)
-        cached = get_broadcasted(key)
-        if cached is not None:
-            return cached
-
-        result = broadcast_to_shape(data, from_shape, to_shape)
-        set_broadcasted(key, result)
-        return result
-
-    def _unbroadcast_grad(self, grad, shape):
-        grad_shape = self.shape
-        ndim = len(grad_shape)
-
-        if len(shape) != ndim:
-            shape = (1,) * (ndim - len(shape)) + shape
-
-        # Assume grad is already a ctypes array
-        grad_sz = 1
-        for dim in grad_shape:
-            grad_sz *= dim
-
-        out_sz = 1
-        for dim in shape:
-            out_sz *= dim
-
-        # Create ctypes output buffer
-        out_arr = (c_float * out_sz)()
-
-        # Compute strides
-        strides_grad = [1] * ndim
-        for i in reversed(range(ndim - 1)):
-            strides_grad[i] = strides_grad[i + 1] * grad_shape[i + 1]
-
-        strides_out = [1] * ndim
-        for i in reversed(range(ndim - 1)):
-            strides_out[i] = strides_out[i + 1] * shape[i + 1]
-
-        # No more .from_buffer — all pure ctypes now
-        c_shape_out = (c_size_t * ndim)(*shape)
-        c_strides_grad = (c_size_t * ndim)(*strides_grad)
-        c_strides_out = (c_size_t * ndim)(*strides_out)
-
-        SimdTensorBackend.tensor_unbroadcast_sum_axes(
-            grad,  # already a POINTER(c_float) or c_float array
-            out_arr,
-            c_shape_out,
-            c_strides_grad,
-            c_strides_out,
-            ndim,
-            grad_sz,
-            out_sz
-        )
-
-        return out_arr
+    @property
+    def ndim(self):
+        return len(self.shape)
 
     def _apply_op(self, other, op_name, grad_fn_name):
         if not isinstance(other, Tensor):
             other = Tensor([other], shape=(1,), requires_grad=False)
 
         # Determine output shape
-        out_shape = Tensor._compute_broadcast_shape(self.shape, other.shape)  # keep it
+        out_shape = compute_broadcast_shape(self.shape, other.shape)  # keep it
 
         # Broadcast data
         a_broadcasted = (
@@ -233,36 +154,283 @@ class Tensor:
                     grad_fn(out_grad, a_broadcasted, b_broadcasted, self_grad, other_grad, n)
 
                 if self.requires_grad:
-                    self_grad = self._unbroadcast_grad(self_grad, self.shape)
-                    SimdTensorBackend.tensor_add_inplace(self.grad, self_grad, self.size)
+                    self.grad = unbroadcast_grad(self_grad, out.shape, self.shape)
 
                 if other.requires_grad:
-                    other_grad = self._unbroadcast_grad(other_grad, other.shape)
-                    SimdTensorBackend.tensor_add_inplace(other.grad, other_grad, other.size)
+                    other.grad = unbroadcast_grad(other_grad, out.shape, other.shape)
 
             out._backward = _backward
             out._prev = [self, other]
 
         return out
     
-    def binary_op(self, other, op_name):
+    def _binary_op(self, other, op_name):
         forward_fn, backward_fn = get_op_names(op_name)
         return self._apply_op(other, forward_fn, backward_fn)
     
-    def __add__(self, other): return self.binary_op(other, 'add')
+    def __add__(self, other): return self._binary_op(other, 'add')
     def __radd__(self, other): return self.__add__(other)
 
-    def __sub__(self, other): return self.binary_op(other, 'sub')
+    def __sub__(self, other): return self._binary_op(other, 'sub')
     def __rsub__(self, other): return Tensor(other, requires_grad=False).__sub__(self)
 
-    def __mul__(self, other): return self.binary_op(other, 'mul')
+    def __mul__(self, other): return self._binary_op(other, 'mul')
     def __rmul__(self, other): return self.__mul__(other)
 
-    def __truediv__(self, other): return self.binary_op(other, 'div')
+    def __truediv__(self, other): return self._binary_op(other, 'div')
     def __rtruediv__(self, other): return Tensor(other, requires_grad=False).__truediv__(self)
 
-    def __pow__(self, other): return self.binary_op(other, 'pow')
+    def __pow__(self, other): return self._binary_op(other, 'pow')
     def __rpow__(self, other): return Tensor(other, requires_grad=False).__pow__(self)
+
+    def reshape(self, new_shape):
+        from functools import reduce
+        from operator import mul
+
+        inferred = -1
+        known_product = 1
+        inferred_index = -1
+        for i, dim in enumerate(new_shape):
+            if dim == -1:
+                assert inferred_index == -1, "Only one dimension can be inferred"
+                inferred_index = i
+            else:
+                known_product *= dim
+
+        original_product = reduce(mul, self.shape, 1)
+        if inferred_index != -1:
+            assert original_product % known_product == 0, "Inferred dimension must divide total size"
+            inferred = original_product // known_product
+            new_shape = list(new_shape)
+            new_shape[inferred_index] = inferred
+
+        assert reduce(mul, new_shape, 1) == original_product, "Reshape must preserve total size"
+
+        return Tensor(self.data, shape=tuple(new_shape), size=original_product, requires_grad=self.requires_grad)
+
+    def conv2d(self, weight, bias=None, stride=(1, 1), padding=(0, 0)):
+        assert self.ndim == 4, f"Expected 4D input tensor, got shape {self.shape}"
+        assert weight.ndim == 4, f"Expected 4D weight tensor, got shape {weight.shape}"
+
+        N, C_in, H_in, W_in = self.shape
+        C_out, C_weight, K_h, K_w = weight.shape
+        assert C_in == C_weight, "Input channel mismatch between input and weight"
+
+        stride_h, stride_w = stride
+        pad_h, pad_w = padding
+
+        H_out = (H_in + 2 * pad_h - K_h) // stride_h + 1
+        W_out = (W_in + 2 * pad_w - K_w) // stride_w + 1
+
+        out_size = N * C_out * H_out * W_out
+        out_data = (c_float * out_size)()
+
+        SimdTensorBackend.conv2d_forward_gemm(
+            self.data,
+            weight.data,
+            bias.data if bias is not None else None,
+            out_data,
+            c_size_t(N), c_size_t(C_in), c_size_t(H_in), c_size_t(W_in),
+            c_size_t(C_out), c_size_t(K_h), c_size_t(K_w),
+            c_size_t(stride_h), c_size_t(stride_w),
+            c_size_t(pad_h), c_size_t(pad_w),
+        )
+
+        out = Tensor(out_data, requires_grad=self.requires_grad or weight.requires_grad or (bias and bias.requires_grad), shape=(N, C_out, H_out, W_out), size=out_size)
+
+        if out.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    return
+
+                grad_input = self.grad if self.requires_grad else None
+                grad_weight = weight.grad if weight.requires_grad else None
+                grad_bias = bias.grad if bias and bias.requires_grad else None
+
+                SimdTensorBackend.conv2d_backward_gemm(
+                    self.data,
+                    weight.data,
+                    out.grad,
+                    grad_input,
+                    grad_weight,
+                    grad_bias,
+                    c_size_t(N), c_size_t(C_in), c_size_t(H_in), c_size_t(W_in),
+                    c_size_t(C_out), c_size_t(K_h), c_size_t(K_w),
+                    c_size_t(stride_h), c_size_t(stride_w),
+                    c_size_t(pad_h), c_size_t(pad_w),
+                )
+
+            out._backward = _backward
+            out._prev = [self, weight] + ([bias] if bias and bias.requires_grad else [])
+
+        return out
+
+    def avgpool2d(self, kernel_size=(2, 2), stride=None):
+        # --- Normalize kernel size ---
+        if isinstance(kernel_size, int):
+            kernel_h = kernel_w = kernel_size
+        else:
+            kernel_h, kernel_w = kernel_size
+
+        # --- Normalize stride ---
+        if stride is None:
+            stride_h, stride_w = kernel_h, kernel_w
+        elif isinstance(stride, int):
+            stride_h = stride_w = stride
+        else:
+            stride_h, stride_w = stride
+
+        # --- Compute output shape ---
+        N, C, H, W = self.shape
+        H_out = (H - kernel_h) // stride_h + 1
+        W_out = (W - kernel_w) // stride_w + 1
+        out_size = N * C * H_out * W_out
+        out_data = (c_float * out_size)()
+
+        # --- Forward ---
+        SimdTensorBackend.avgpool2d_forward(
+            self.data, out_data,
+            c_size_t(N), c_size_t(C), c_size_t(H), c_size_t(W),
+            c_size_t(kernel_h), c_size_t(kernel_w),
+            c_size_t(stride_h), c_size_t(stride_w)
+        )
+
+        out = Tensor(out_data, shape=(N, C, H_out, W_out), size=out_size, requires_grad=self.requires_grad)
+
+        # --- Backward ---
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    return
+
+                if self.grad is None:
+                    self.grad = (c_float * (N * C * H * W))()
+
+                SimdTensorBackend.avgpool2d_backward(
+                    out.grad, self.grad,
+                    c_size_t(N), c_size_t(C), c_size_t(H), c_size_t(W),
+                    c_size_t(kernel_h), c_size_t(kernel_w),
+                    c_size_t(stride_h), c_size_t(stride_w)
+                )
+
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
+
+    def maxpool2d(self, kernel_size=(2, 2), stride=None):
+        # --- Normalize kernel size ---
+        if isinstance(kernel_size, int):
+            kernel_h = kernel_w = kernel_size
+        else:
+            kernel_h, kernel_w = kernel_size
+
+        # --- Normalize stride ---
+        if stride is None:
+            stride_h, stride_w = kernel_h, kernel_w
+        elif isinstance(stride, int):
+            stride_h = stride_w = stride
+        else:
+            stride_h, stride_w = stride
+
+        # --- Shape info ---
+        N, C, H, W = self.shape
+        H_out = (H - kernel_h + stride_h) // stride_h
+        W_out = (W - kernel_w + stride_w) // stride_w
+        out_size = N * C * H_out * W_out
+
+        out_data = (c_float * out_size)()
+
+        # --- Forward ---
+        SimdTensorBackend.maxpool2d_forward(
+            self.data, out_data,
+            c_size_t(N), c_size_t(C), c_size_t(H), c_size_t(W),
+            c_size_t(kernel_h), c_size_t(kernel_w),
+            c_size_t(stride_h), c_size_t(stride_w)
+        )
+
+        out = Tensor(out_data, shape=(N, C, H_out, W_out), size=out_size, requires_grad=self.requires_grad)
+
+        # --- Backward ---
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    return
+                if self.grad is None:
+                    self.grad = (c_float * (N * C * H * W))()
+
+                SimdTensorBackend.maxpool2d_backward(
+                    self.data, out.grad, self.grad,
+                    c_size_t(N), c_size_t(C), c_size_t(H), c_size_t(W),
+                    c_size_t(kernel_h), c_size_t(kernel_w),
+                    c_size_t(stride_h), c_size_t(stride_w)
+                )
+
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
+
+    def relu(self):
+        out_data = (c_float * self.size)()
+
+        SimdTensorBackend.tensor_relu(self.data, out_data, self.size)
+
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape, size=self.size)
+
+        if out.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    return
+                if self.requires_grad:
+                    SimdTensorBackend.tensor_relu_backward(
+                        out.grad,
+                        self.data,
+                        self.grad,
+                        self.size
+                    )
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
+    
+    def cross_entropy(self, target):
+        assert self.shape == target.shape, f"Shape mismatch: {self.shape} vs {target.shape}"
+        B, C = self.shape
+        loss_data = (c_float * B)()
+        grad_input = (c_float * (B * C))()
+        probs_data = (c_float * (B * C))()
+
+        SimdTensorBackend.tensor_softmax_ce(
+            self.data,
+            target.data,
+            None,
+            loss_data,
+            grad_input,
+            probs_data,
+            B,
+            C
+        )
+
+        loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,), size=B)
+
+        if loss.requires_grad:
+            def _backward():
+                if self.requires_grad:
+                    SimdTensorBackend.tensor_softmax_ce(
+                        self.data,
+                        target.data,
+                        loss.grad,
+                        loss_data,
+                        self.grad,
+                        None,
+                        B,
+                        C
+                    )
+            loss._backward = _backward
+            loss._prev = [self, target]
+
+        return loss.mean()
 
     def matmul(self, other):
         assert isinstance(other, Tensor), "Operand must be a Tensor"
@@ -335,100 +503,31 @@ class Tensor:
 
         return out
 
-    def cross_entropy(self, target):
-        assert self.shape == target.shape, f"Shape mismatch: {self.shape} vs {target.shape}"
-        B, C = self.shape
-        loss_data = (c_float * B)()
-        grad_input = (c_float * (B * C))()
-        probs_data = (c_float * (B * C))()
-
-        SimdTensorBackend.tensor_softmax_ce(
-            self.data,
-            target.data,
-            None,
-            loss_data,
-            grad_input,
-            probs_data,
-            B,
-            C
-        )
-
-        loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,), size=B)
-
-        if loss.requires_grad:
-            def _backward():
-                if self.requires_grad:
-                    SimdTensorBackend.tensor_softmax_ce(
-                        self.data,
-                        target.data,
-                        loss.grad,
-                        loss_data,
-                        self.grad,
-                        None,
-                        B,
-                        C
-                    )
-            loss._backward = _backward
-            loss._prev = [self, target]
-
-        return loss.mean()
-
-    def relu(self):
-        out_data = (c_float * self.size)()
-
-        SimdTensorBackend.tensor_relu(
-            self.data,
-            out_data,
-            self.size
-        )
-
-        out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape, size=self.size)
+    def sum(self):
+        out_data = (c_float * 1)()
+        result = SimdTensorBackend.tensor_sum(self.data, None, self.size)
+        out_data[0] = result
+        out = Tensor(out_data, requires_grad=self.requires_grad)
 
         if out.requires_grad:
             def _backward():
-                if out.grad is None:
-                    return
                 if self.requires_grad:
-                    SimdTensorBackend.tensor_relu_backward(
-                        out.grad,
-                        self.data,
-                        self.grad,
-                        self.size
-                    )
+                    SimdTensorBackend.tensor_sum(self.data, self.grad, self.size)
             out._backward = _backward
             out._prev = [self]
 
         return out
 
     def mean(self):
-        result = SimdTensorBackend.tensor_mean(self.data, self.size)
         out_data = (c_float * 1)()
+        result = SimdTensorBackend.tensor_mean(self.data, None, self.size)
         out_data[0] = result
         out = Tensor(out_data, requires_grad=self.requires_grad)
 
         if out.requires_grad:
             def _backward():
                 if self.requires_grad:
-                    grad_val = out.grad[0] / self.size
-                    grad_array = (c_float * self.size)(*([grad_val] * self.size))
-                    SimdTensorBackend.tensor_add_inplace(self.grad, grad_array, self.size)
-            out._backward = _backward
-            out._prev = [self]
-
-        return out
-
-    def sum(self):
-        result = SimdTensorBackend.tensor_sum(self.data, self.size)
-        out_data = (c_float * 1)()
-        out_data[0] = result
-        out = Tensor(out_data, requires_grad=self.requires_grad)
-
-        if out.requires_grad:
-            def _backward():
-                if self.requires_grad:
-                    grad_val = out.grad[0]
-                    grad_array = (c_float * self.size)(*([grad_val] * self.size))
-                    SimdTensorBackend.tensor_add_inplace(self.grad, grad_array, self.size)
+                    SimdTensorBackend.tensor_mean(self.data, self.grad, self.size)
             out._backward = _backward
             out._prev = [self]
 
@@ -465,14 +564,6 @@ class Tensor:
         for t in reversed(topo):
             if t._backward is not None:
                 t._backward()
-
-        # Set strides (optional, depends on rest of your code)
-        shape = self.shape
-        ndim = len(shape)
-        strides = [1] * ndim
-        for i in reversed(range(ndim - 1)):
-            strides[i] = strides[i + 1] * shape[i + 1]
-        self.strides = tuple(strides)
 
     def __repr__(self):
         return f"Tensor(shape={self.shape}, data={[self.data[i] for i in range(len(self.data))]}, grad={[self.grad[i] for i in range(len(self.grad))] if self.grad else None})"

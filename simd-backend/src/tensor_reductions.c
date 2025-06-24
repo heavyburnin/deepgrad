@@ -92,7 +92,7 @@ __m256 exp256_ps(__m256 x) {
     return result;
 }
 
-float tensor_sum(const float* input, size_t len) {
+float tensor_sum(const float* input, float* grad_out, size_t len) {
     if (!input) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_sum\n");
         return 0.0f;
@@ -101,7 +101,6 @@ float tensor_sum(const float* input, size_t len) {
     float total_sum = 0.0f;
     size_t vec_end = len - (len % 8);
 
-    // Use OpenMP with private SIMD accumulators
     #pragma omp parallel reduction(+:total_sum)
     {
         __m256 vsum = _mm256_setzero_ps();
@@ -110,37 +109,51 @@ float tensor_sum(const float* input, size_t len) {
         for (size_t i = 0; i < vec_end; i += 8) {
             __m256 v = _mm256_loadu_ps(input + i);
             vsum = _mm256_add_ps(vsum, v);
+
+            // Optional: write gradient directly
+            if (grad_out) {
+                _mm256_storeu_ps(grad_out + i, _mm256_set1_ps(1.0f));  // d(sum)/dx = 1
+            }
         }
 
-        // Reduce the SIMD register to scalar
-        float partial_sum = hsum256_ps(vsum);
-
-        // Add thread-local partial sum to the global reduction
-        total_sum += partial_sum;
-
-        // Implicit barrier here due to reduction
+        float partial = hsum256_ps(vsum);
+        total_sum += partial;
     }
 
-    // Handle remaining elements
+    // Handle tail
     for (size_t i = vec_end; i < len; i++) {
         total_sum += input[i];
+        if (grad_out) grad_out[i] = 1.0f;
     }
 
     return total_sum;
 }
 
-float tensor_mean(const float* input, size_t len) {
+float tensor_mean(const float* input, float* grad_out, size_t len) {
     if (!input) {
         fprintf(stderr, "Error: NULL pointer passed to tensor_mean\n");
         return 0.0f;
     }
-    
+
     if (len == 0) {
         fprintf(stderr, "Error: Division by zero in tensor_mean\n");
         return 0.0f;
     }
-    
-    return tensor_sum(input, len) / (float)len;
+
+    float inv_len = 1.0f / (float)len;
+
+    // Instead of recomputing logic, just call tensor_sum with grad_out
+    float sum = tensor_sum(input, grad_out, len);  // this fills grad_out with 1s if given
+
+    // If backward, scale the gradients by 1/N
+    if (grad_out) {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < len; ++i) {
+            grad_out[i] *= inv_len;
+        }
+    }
+
+    return sum * inv_len;
 }
 
 void tensor_softmax_ce(

@@ -23,10 +23,10 @@ __m256 log256_ps(__m256 x);
 __m256 exp256_ps(__m256 x);
 
 // Compute sum of all elements in a float array
-float tensor_sum(const float* input, size_t len);
+float tensor_sum(const float* input, float* grad_out, size_t len);
 
 // Compute mean of all elements in a float array
-float tensor_mean(const float* input, size_t len);
+float tensor_mean(const float* input, float* grad_out, size_t len);
 
 // Softmax + cross-entropy + gradient (fused)
 // - logits: [batch x class_count]

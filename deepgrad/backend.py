@@ -31,8 +31,18 @@ function_signatures = {
    'tensor_relu': ([c_float_p, c_float_p, c_size_t], None),
    'tensor_relu_backward': ([c_float_p, c_float_p, c_float_p, c_size_t], None),
 
-   'tensor_matmul': ([c_int, c_float_p, c_float_p, c_float_p, c_float_p,
-                      c_float_p, c_size_t, c_size_t, c_size_t,c_size_t, c_bool], None),
+   'tensor_matmul':([
+      c_int,       # PassMode mode (MATMUL_FORWARD or MATMUL_BACKWARD)
+      c_float_p,   # const float* A
+      c_float_p,   # const float* B
+      c_float_p,   # const float* grad_out
+      c_float_p,   # float* C_or_A (output or grad_A)
+      c_float_p,   # float* grad_B
+      c_size_t,    # size_t batch
+      c_size_t,    # size_t M
+      c_size_t,    # size_t K
+      c_size_t,    # size_t N
+      c_bool], None),
 
    'tensor_softmax_ce': ([c_float_p, c_int_p, c_float_p, c_float_p,
                           c_float_p, c_float_p, c_size_t, c_size_t,

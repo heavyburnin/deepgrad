@@ -186,42 +186,6 @@ class Tensor:
     def __pow__(self, other): return self._binary_op(other, 'pow')
     def __rpow__(self, other): return Tensor(other, requires_grad=False).__pow__(self)
 
-    def reshape_bak(self, new_shape):
-        inferred_index = -1
-        known_product = 1
-
-        # Compute known product and track inferred index
-        for i, dim in enumerate(new_shape):
-            if dim == -1:
-                if inferred_index != -1:
-                    raise AssertionError("Only one dimension can be inferred")
-                inferred_index = i
-            else:
-                known_product *= dim
-
-        original_product = 1
-        for dim in self.shape:
-            original_product *= dim
-
-        # Compute inferred dimension if any
-        if inferred_index != -1:
-            if original_product % known_product != 0:
-                raise AssertionError("Inferred dimension must divide total size")
-            inferred = original_product // known_product
-            # Replace inferred dimension in a tuple without creating intermediate list
-            new_shape = tuple(
-                inferred if i == inferred_index else dim
-                for i, dim in enumerate(new_shape)
-            )
-
-        # Verify total size consistency
-        total = 1
-        for dim in new_shape:
-            total *= dim
-        assert total == original_product, "Reshape must preserve total size"
-
-        return Tensor(self.data, shape=new_shape, size=original_product, requires_grad=self.requires_grad)
-
     def reshape(self, new_shape):
         inferred = -1
         known_product = 1
@@ -430,44 +394,6 @@ class Tensor:
 
         return out
     
-    def cross_entropy_back(self, target):
-        assert self.shape == target.shape, f"Shape mismatch: {self.shape} vs {target.shape}"
-        B, C = self.shape
-        loss_data = (c_float * B)()
-        grad_input = (c_float * (B * C))()
-        probs_data = (c_float * (B * C))()
-
-        SimdTensorBackend.tensor_softmax_ce(
-            self.data,
-            target.data,
-            None,
-            loss_data,
-            grad_input,
-            probs_data,
-            B,
-            C
-        )
-
-        loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,), size=B)
-
-        if loss.requires_grad:
-            def _backward():
-                if self.requires_grad:
-                    SimdTensorBackend.tensor_softmax_ce(
-                        self.data,
-                        target.data,
-                        loss.grad,
-                        loss_data,
-                        self.grad,
-                        None,
-                        B,
-                        C
-                    )
-            loss._backward = _backward
-            loss._prev = [self, target]
-
-        return loss.mean()
-
     def cross_entropy(self, target, label_smoothing=0.0, use_label_smoothing=0):
         # self: logits of shape (B, C)
         # target: integer class labels of shape (B,)
@@ -524,7 +450,7 @@ class Tensor:
 
         s1, s2 = self.shape, other.shape
 
-        # Determine dimensions and batching
+        # Determine matmul shapes and batch count
         if len(s1) == 2 and len(s2) == 2:
             M, K = s1
             K2, N = s2
@@ -540,48 +466,51 @@ class Tensor:
             B, K2, N = s2
             assert K == K2, f"Incompatible matmul shapes {s1} and {s2}"
             batch = B
+        elif len(s1) == 3 and len(s2) == 3:
+            B, M, K = s1
+            B2, K2, N = s2
+            assert B == B2 and K == K2, f"Incompatible matmul shapes {s1} and {s2}"
+            batch = B
         else:
             raise NotImplementedError(f"Unsupported shapes for matmul: {s1} @ {s2}")
 
-        # Output shape/size
         out_shape = (batch, M, N) if batch > 1 else (M, N)
-        out_size = batch * M * N if batch > 1 else M * N
-
+        out_size = batch * M * N
         out_data = (c_float * out_size)()
 
-        # Forward pass
+        # Forward
         SimdTensorBackend.tensor_matmul(
             0,  # MATMUL_FORWARD
             self.data,
             other.data,
-            None,           # grad_out (unused)
+            None,
             out_data,
-            None,           # grad_B (unused)
-            batch,
-            M, K, N,
+            None,
+            batch, M, K, N,
             False
         )
 
         out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape, size=out_size)
 
-        # Backward setup
         if out.requires_grad:
             def _backward():
                 if out.grad is None:
                     return
 
-                grad_A = self.grad if self.requires_grad else None
-                grad_B = other.grad if other.requires_grad else None
+                # Allocate grad buffers on-demand
+                if self.requires_grad and self.grad is None:
+                    self.grad = (c_float * (batch * M * K))()
+                if other.requires_grad and other.grad is None:
+                    other.grad = (c_float * (K * N))()
 
                 SimdTensorBackend.tensor_matmul(
                     1,  # MATMUL_BACKWARD
                     self.data,
                     other.data,
                     out.grad,
-                    grad_A,
-                    grad_B,
-                    batch,
-                    M, K, N,
+                    self.grad if self.requires_grad else None,
+                    other.grad if other.requires_grad else None,
+                    batch, M, K, N,
                     True
                 )
 

@@ -9,15 +9,18 @@
 
 // Utility to allocate or reuse aligned memory
 float* get_cached_buffer(float** buf, size_t* current_size, size_t required_size) {
-    if (*current_size < required_size) {
+    // Round up to next multiple of 8 for safe AVX loads
+    size_t padded_size = ((required_size + 7) / 8) * 8;
+
+    if (*current_size < padded_size) {
         if (*buf) _mm_free(*buf);
-        *buf = (float*)_mm_malloc(required_size * sizeof(float), 64);
+        *buf = (float*)_mm_malloc(padded_size * sizeof(float), 64);
         if (!*buf) {
             fprintf(stderr, "Error: Memory allocation failed\n");
             *current_size = 0;
             return NULL;
         }
-        *current_size = required_size;
+        *current_size = padded_size;
     }
     return *buf;
 }
@@ -88,6 +91,62 @@ void sgd_update_inplace(float* weights, const float* grads, size_t size, float l
     // Handle remaining elements
     for (; i < size; i++) {
         weights[i] = weights[i] - lr * grads[i];
+    }
+}
+
+// In-place Adam update
+void adam_update_inplace(
+    float* param,      // parameter data
+    float* grad,       // gradient
+    float* m,          // first moment
+    float* v,          // second moment
+    size_t size,       // number of elements
+    float lr,          // learning rate
+    float beta1,       // beta1
+    float beta2,       // beta2
+    float eps,         // epsilon
+    int t              // current timestep
+) {
+    float beta1_t = 1.0f - powf(beta1, t);
+    float beta2_t = 1.0f - powf(beta2, t);
+
+    #pragma omp parallel for
+    for (size_t i = 0; i < size; ++i) {
+        float g = grad[i];
+        m[i] = beta1 * m[i] + (1.0f - beta1) * g;
+        v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
+
+        float m_hat = m[i] / beta1_t;
+        float v_hat = v[i] / beta2_t;
+
+        param[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
+    }
+}
+
+void adamw_update_inplace(
+    float* param,
+    float* grad,
+    float* m,
+    float* v,
+    int size,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    int t,
+    float weight_decay
+) {
+    for (int i = 0; i < size; i++) {
+        // Decoupled weight decay
+        param[i] -= lr * weight_decay * param[i];
+
+        m[i] = beta1 * m[i] + (1 - beta1) * grad[i];
+        v[i] = beta2 * v[i] + (1 - beta2) * grad[i] * grad[i];
+
+        float m_hat = m[i] / (1 - powf(beta1, t));
+        float v_hat = v[i] / (1 - powf(beta2, t));
+
+        param[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
     }
 }
 

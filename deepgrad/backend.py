@@ -34,8 +34,9 @@ function_signatures = {
    'tensor_matmul': ([c_int, c_float_p, c_float_p, c_float_p, c_float_p,
                       c_float_p, c_size_t, c_size_t, c_size_t,c_size_t, c_bool], None),
 
-   'tensor_softmax_ce': ([c_float_p, c_float_p, c_float_p, c_float_p,
-                          c_float_p, c_float_p, c_size_t, c_size_t], None),
+   'tensor_softmax_ce': ([c_float_p, c_int_p, c_float_p, c_float_p,
+                          c_float_p, c_float_p, c_size_t, c_size_t,
+                          c_float, c_int], None),
 
    'tensor_sum': ([c_float_p, c_float_p, c_size_t], c_float),
    'tensor_mean': ([c_float_p, c_float_p, c_size_t], c_float),
@@ -114,6 +115,52 @@ function_signatures = {
    'maxpool2d_backward': ([c_float_p, c_float_p, c_float_p, c_size_t, c_size_t, c_size_t, c_size_t,
                            c_size_t, c_size_t, c_size_t, c_size_t], None),
 
+   'adam_update_inplace': ([
+      c_float_p,  # param
+      c_float_p,  # grad
+      c_float_p,  # m
+      c_float_p,  # v
+      ctypes.c_size_t,
+      c_float, c_float, c_float, c_float, c_int], None),
+
+   
+   'adamw_update_inplace': ([
+      c_float_p,  # param
+      c_float_p,  # grad
+      c_float_p,  # m
+      c_float_p,  # v
+      ctypes.c_size_t,
+      c_float, c_float, c_float, c_float, c_int, c_float], None),
+
+   'batchnorm_forward_f32': ([
+         c_float_p,
+         c_float_p,  # out
+         c_float_p,  # x_hat
+         c_float_p,  # gamma
+         c_float_p,  # beta
+         c_float_p,  # running_mean
+         c_float_p,  # running_var
+         c_size_t,   # B
+         c_size_t,   # C
+         c_size_t,   # H
+         c_size_t,   # W
+         c_float,    # eps
+         c_float,    # momentum
+         c_bool], None),
+
+   'batchnorm_backward_f32': ([
+         c_float_p,  # x_hat
+         c_float_p,  # grad_out
+         c_float_p,  # grad_in
+         c_float_p,  # grad_gamma
+         c_float_p,  # grad_beta
+         c_float_p,  # gamma
+         c_size_t,   # B
+         c_size_t,   # C
+         c_size_t,   # H
+         c_size_t,   # W
+         c_float     # eps
+      ], None)
 
 }
 

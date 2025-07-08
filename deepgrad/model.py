@@ -2,6 +2,7 @@ import random
 import math
 from ctypes import c_float
 from deepgrad.tensor import Tensor
+from deepgrad.batchnorm import BatchNorm1D, BatchNorm2D
 
 def make_random_array(size, scale):
     arr = (c_float * size)()
@@ -14,65 +15,136 @@ def make_zero_array(size):
 
 class ConvNet:
     def __init__(self):
-        scale1 = math.sqrt(2.0 / (1 * 3 * 3))
-        self.w1 = Tensor(make_random_array(1 * 8 * 3 * 3, scale1), requires_grad=True, shape=(8, 1, 3, 3), size=8 * 1 * 3 * 3)
-        self.b1 = Tensor(make_zero_array(8), requires_grad=True, shape=(8,), size=8)
+        self.training = True
 
-        scale2 = math.sqrt(2.0 / (8 * 3 * 3))
-        self.w2 = Tensor(make_random_array(8 * 16 * 3 * 3, scale2), requires_grad=True, shape=(16, 8, 3, 3), size=16 * 8 * 3 * 3)
-        self.b2 = Tensor(make_zero_array(16), requires_grad=True, shape=(16,), size=16)
+        # Conv1: 1 → 24
+        scale1 = math.sqrt(2.0 / (1 * 5 * 5))
+        self.w1 = Tensor(make_random_array(24 * 1 * 5 * 5, scale1), requires_grad=True, shape=(24, 1, 5, 5), size=24 * 1 * 5 * 5)
+        self.b1 = Tensor(make_zero_array(24), requires_grad=True, shape=(24,), size=24)
+        self.bn1 = BatchNorm2D(24)
 
-        scale3 = math.sqrt(2.0 / (16 * 7 * 7))
-        self.w3 = Tensor(make_random_array(16 * 7 * 7 * 10, scale3), requires_grad=True, shape=(16 * 7 * 7, 10), size=16 * 7 * 7 * 10)
-        self.b3 = Tensor(make_zero_array(10), requires_grad=True, shape=(1, 10), size=10)
+        # Conv2: 24 → 32
+        scale2 = math.sqrt(2.0 / (24 * 3 * 3))
+        self.w2 = Tensor(make_random_array(32 * 24 * 3 * 3, scale2), requires_grad=True, shape=(32, 24, 3, 3), size=32 * 24 * 3 * 3)
+        self.b2 = Tensor(make_zero_array(32), requires_grad=True, shape=(32,), size=32)
+        self.bn2 = BatchNorm2D(32)
+
+        # FC1: 800 → 256
+        scale3 = math.sqrt(2.0 / 800)
+        self.w3 = Tensor(make_random_array(800 * 256, scale3), requires_grad=True, shape=(800, 256), size=800 * 256)
+        self.b3 = Tensor(make_zero_array(256), requires_grad=True, shape=(1, 256), size=256)
+
+        # FC2: 256 → 10
+        scale4 = math.sqrt(2.0 / 256)
+        self.w4 = Tensor(make_random_array(256 * 10, scale4), requires_grad=True, shape=(256, 10), size=256 * 10)
+        self.b4 = Tensor(make_zero_array(10), requires_grad=True, shape=(1, 10), size=10)
+
+        # Layer list
+        self.layers = [
+            lambda x: x.reshape((x.shape[0], 1, 28, 28)),
+
+            lambda x: x.conv2d(self.w1, self.b1, stride=(1, 1), padding=(0, 0)),
+            self.bn1, Tensor.relu,
+            lambda x: x.maxpool2d(kernel_size=2, stride=2),
+
+            lambda x: x.conv2d(self.w2, self.b2, stride=(1, 1), padding=(0, 0)),
+            self.bn2, Tensor.relu,
+            lambda x: x.maxpool2d(kernel_size=2, stride=2),
+
+            lambda x: x.reshape((x.shape[0], -1)),
+            lambda x: x.matmul(self.w3) + self.b3,
+            Tensor.relu,
+            lambda x: x.dropout(0.25) if self.training else x,
+
+            lambda x: x.matmul(self.w4) + self.b4
+        ]
 
     def __call__(self, x):
-        x = x.reshape((x.shape[0], 1, 28, 28))
-
-        x = x.conv2d(self.w1, self.b1, stride=(1, 1), padding=(1, 1)).relu()
-        x = x.maxpool2d(kernel_size=2, stride=2)
-
-        x = x.conv2d(self.w2, self.b2, stride=(1, 1), padding=(1, 1)).relu()
-        x = x.maxpool2d(kernel_size=2, stride=2)
-        
-
-        x = x.reshape((x.shape[0], -1))
-        x = x.matmul(self.w3) + self.b3
+        for layer in self.layers:
+            x = layer(x)
         return x
 
     def parameters(self):
-        return [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
+        return [self.w1, self.b1,
+                self.w2, self.b2,
+                self.w3, self.b3,
+                self.w4, self.b4,
+                *self.bn1.parameters(), *self.bn2.parameters()]
 
-class MLP:
-    def __init__(self, input_size, hidden1, hidden2, output_size):
-        xavier_1 = math.sqrt(6.0 / (input_size + hidden1))
-        xavier_2 = math.sqrt(6.0 / (hidden1 + hidden2))
-        xavier_3 = math.sqrt(6.0 / (hidden2 + output_size))
+    def train(self):
+        self.training = True
+        self.bn1.training = True
+        self.bn2.training = True
 
-        size_w1 = input_size * hidden1
-        size_b1 = hidden1
-        size_w2 = hidden1 * hidden2
-        size_b2 = hidden2
-        size_w3 = hidden2 * output_size
-        size_b3 = output_size
+    def eval(self):
+        self.training = False
+        self.bn1.training = False
+        self.bn2.training = False
 
-        self.w1 = Tensor(make_random_array(size_w1, xavier_1), requires_grad=True, shape=(input_size, hidden1), size=size_w1)
+class FashionConvNet:
+    def __init__(self):
+        self.training = True
 
-        self.b1 = Tensor(make_zero_array(size_b1), requires_grad=True, shape=(1, hidden1), size=size_b1)
+        # Conv1: 1 → 24
+        scale1 = math.sqrt(2.0 / (1 * 5 * 5))
+        self.w1 = Tensor(make_random_array(24 * 1 * 5 * 5, scale1), requires_grad=True, shape=(24, 1, 5, 5), size=24 * 1 * 5 * 5)
+        self.b1 = Tensor(make_zero_array(24), requires_grad=True, shape=(24,), size=24)
+        self.bn1 = BatchNorm2D(24)
 
-        self.w2 = Tensor(make_random_array(size_w2, xavier_2), requires_grad=True, shape=(hidden1, hidden2), size=size_w2)
+        # Conv2: 24 → 32
+        scale2 = math.sqrt(2.0 / (24 * 3 * 3))
+        self.w2 = Tensor(make_random_array(32 * 24 * 3 * 3, scale2), requires_grad=True, shape=(32, 24, 3, 3), size=32 * 24 * 3 * 3)
+        self.b2 = Tensor(make_zero_array(32), requires_grad=True, shape=(32,), size=32)
+        self.bn2 = BatchNorm2D(32)
 
-        self.b2 = Tensor(make_zero_array(size_b2), requires_grad=True, shape=(1, hidden2), size=size_b2)
+        # FC1: 800 → 256
+        scale3 = math.sqrt(2.0 / 800)
+        self.w3 = Tensor(make_random_array(800 * 256, scale3), requires_grad=True, shape=(800, 256), size=800 * 256)
+        self.b3 = Tensor(make_zero_array(256), requires_grad=True, shape=(1, 256), size=256)
 
-        self.w3 = Tensor(make_random_array(size_w3, xavier_3), requires_grad=True, shape=(hidden2, output_size), size=size_w3)
+        # FC2: 256 → 10
+        scale4 = math.sqrt(2.0 / 256)
+        self.w4 = Tensor(make_random_array(256 * 10, scale4), requires_grad=True, shape=(256, 10), size=256 * 10)
+        self.b4 = Tensor(make_zero_array(10), requires_grad=True, shape=(1, 10), size=10)
 
-        self.b3 = Tensor(make_zero_array(size_b3), requires_grad=True, shape=(1, output_size), size=size_b3)
+        # Layer list
+        self.layers = [
+            lambda x: x.reshape((x.shape[0], 1, 28, 28)),
+
+            lambda x: x.conv2d(self.w1, self.b1, stride=(1, 1), padding=(0, 0)),
+            self.bn1, Tensor.relu,
+            lambda x: x.maxpool2d(kernel_size=2, stride=2),
+
+            lambda x: x.conv2d(self.w2, self.b2, stride=(1, 1), padding=(0, 0)),
+            self.bn2, Tensor.relu,
+            lambda x: x.maxpool2d(kernel_size=2, stride=2),
+
+            lambda x: x.reshape((x.shape[0], -1)),
+            lambda x: x.matmul(self.w3) + self.b3,
+            Tensor.relu,
+            lambda x: x.dropout(0.5) if self.training else x,
+
+            lambda x: x.matmul(self.w4) + self.b4
+        ]
 
     def __call__(self, x):
-        x = (x.matmul(self.w1) + self.b1).relu()
-        x = (x.matmul(self.w2) + self.b2).relu()
-        x = x.matmul(self.w3) + self.b3
+        for layer in self.layers:
+            x = layer(x)
         return x
 
     def parameters(self):
-        return [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
+        return [self.w1, self.b1,
+                self.w2, self.b2,
+                self.w3, self.b3,
+                self.w4, self.b4,
+                *self.bn1.parameters(), *self.bn2.parameters()]
+
+    def train(self):
+        self.training = True
+        self.bn1.training = True
+        self.bn2.training = True
+
+    def eval(self):
+        self.training = False
+        self.bn1.training = False
+        self.bn2.training = False

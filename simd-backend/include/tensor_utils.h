@@ -14,6 +14,33 @@ void tensor_add_inplace(float* target, const float* source, size_t size);
 void tensor_fill_inplace(float* data, float value, size_t size);
 void sgd_update_inplace(float* weights, const float* grads, size_t size, float lr);
 
+void adam_update_inplace(
+    float* param,
+    float* grad,
+    float* m,
+    float* v,
+    size_t size,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    int t
+);
+
+void adamw_update_inplace(
+    float* param,
+    float* grad,
+    float* m,
+    float* v,
+    int size,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    int t,
+    float weight_decay
+);
+
 // Zero Gradients
 void zero_float_array(float *data, size_t size);
 

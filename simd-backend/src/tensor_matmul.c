@@ -2,24 +2,27 @@
 
 #include "tensor_matmul.h"
 #include "tensor_utils.h"   // for get_cached_buffer()
-#include <immintrin.h>      // for AVX intrinsics
-#include <stdbool.h>        // for bool
-#include <stddef.h>         // for size_t
-#include <stdio.h>          // for fprintf, stderr
-#include <stdlib.h>         // for atexit
-#include <mm_malloc.h>      // for _mm_free
-#include <omp.h>            // for OpenMP
+#include <immintrin.h>      // AVX intrinsics
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <mm_malloc.h>
+#include <omp.h>
+#include <assert.h>
 
-#define TILE_M 32
-#define TILE_N 32
-#define TILE_K 32
+#define TILE_M 64
+#define TILE_N 64
+#define TILE_K 64
 
+// Cached buffers for transpose and temporary storage
 static float* cached_B_T = NULL;
 static size_t cached_B_T_size = 0;
 
 static float* cached_grad_out_T = NULL;
 static size_t cached_grad_out_T_size = 0;
 
+// Cache to avoid redundant transposes
 static const float* last_B_ptr = NULL;
 static size_t last_K = 0;
 static size_t last_N = 0;
@@ -32,13 +35,11 @@ void tensor_matmul_free_cache() {
         cached_B_T = NULL;
         cached_B_T_size = 0;
     }
-
     if (cached_grad_out_T) {
         _mm_free(cached_grad_out_T);
         cached_grad_out_T = NULL;
         cached_grad_out_T_size = 0;
     }
-
     last_B_ptr = NULL;
     last_K = 0;
     last_N = 0;
@@ -51,7 +52,7 @@ void matmul_forward(
 ) {
     size_t total_ops = M * K * N;
 
-    // For small matmuls, skip B_T and use plain scalar matmul
+    // For small matmuls, fallback to scalar loop to avoid overhead
     if (batch * total_ops < 10000) {
         #pragma omp parallel for
         for (size_t b = 0; b < batch; ++b) {
@@ -69,10 +70,10 @@ void matmul_forward(
         return;
     }
 
-    // Use AVX2 path — allocate + transpose B_T
+    // Allocate and transpose B (KxN -> NxK) for better memory access in AVX2
     float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
     if (!B_T) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        fprintf(stderr, "Error: Memory allocation failed for B_T\n");
         return;
     }
 
@@ -87,6 +88,7 @@ void matmul_forward(
                 B_T[n * K + k] = B[k * N + n];
     }
 
+    // Main tiled AVX2 matmul with OpenMP parallelization over batch and tiles
     #pragma omp parallel for collapse(3) schedule(static)
     for (size_t b = 0; b < batch; ++b) {
         for (size_t i0 = 0; i0 < M; i0 += TILE_M) {
@@ -133,9 +135,10 @@ void matmul_backward(
     size_t batch, size_t M, size_t K, size_t N,
     bool accumulate
 ) {
+    // Allocate and transpose B_T (KxN -> NxK)
     float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
     if (!B_T) {
-        fprintf(stderr, "Error: Memory allocation failed\n");
+        fprintf(stderr, "Error: Memory allocation failed for B_T\n");
         return;
     }
 
@@ -150,10 +153,10 @@ void matmul_backward(
                 B_T[n * K + k] = B[k * N + n];
     }
 
-    // Allocate and transpose grad_out to grad_out_T: (batch, M, N) → (batch, N, M)
+    // Allocate and transpose grad_out_T (batch x M x N -> batch x N x M) for grad_B calculation
     float* grad_out_T = NULL;
     if (grad_B != NULL) {
-        grad_out_T = get_cached_buffer(&cached_grad_out_T, &cached_grad_out_T_size, batch * M * N);
+        grad_out_T = get_cached_buffer(&cached_grad_out_T, &cached_grad_out_T_size, batch * N * M);
         if (!grad_out_T) {
             fprintf(stderr, "Error: Memory allocation failed for grad_out_T\n");
             return;
@@ -169,6 +172,7 @@ void matmul_backward(
         }
     }
 
+    // Compute grad_A: tiled AVX2 kernel (batch x M x K)
     #pragma omp parallel for collapse(3) schedule(static)
     for (size_t b = 0; b < batch; ++b) {
         for (size_t i0 = 0; i0 < M; i0 += TILE_M) {
@@ -178,14 +182,19 @@ void matmul_backward(
                     size_t j_max = (j0 + TILE_K > K) ? K : j0 + TILE_K;
                     size_t k_max = (k0 + TILE_N > N) ? N : k0 + TILE_N;
 
-                    // grad_A
                     for (size_t i = i0; i < i_max; ++i) {
                         for (size_t j = j0; j < j_max; ++j) {
                             __m256 vsum_a = _mm256_setzero_ps();
                             size_t k = k0;
-                            for (; k + 7 < k_max; k += 8) {
+                            for (; k + 8 <= k_max; k += 8) {
                                 __m256 vgrad_out = _mm256_loadu_ps(&grad_out[b * M * N + i * N + k]);
-                                __m256 vB_T = _mm256_loadu_ps(&B_T[k * K + j]);
+                                float tmp_b[8] = {0};
+                                for (int x = 0; x < 8; ++x) {
+                                    size_t idx = j * K + k + x;
+                                    if (idx < K * N)
+                                        tmp_b[x] = B_T[idx];
+                                }
+                                __m256 vB_T = _mm256_loadu_ps(tmp_b);
                                 vsum_a = _mm256_fmadd_ps(vgrad_out, vB_T, vsum_a);
                             }
 
@@ -193,8 +202,9 @@ void matmul_backward(
                             _mm256_storeu_ps(buf_a, vsum_a);
                             float sum_a = buf_a[0] + buf_a[1] + buf_a[2] + buf_a[3] +
                                           buf_a[4] + buf_a[5] + buf_a[6] + buf_a[7];
+
                             for (; k < k_max; ++k)
-                                sum_a += grad_out[b * M * N + i * N + k] * B_T[k * K + j];
+                                sum_a += grad_out[b * M * N + i * N + k] * B_T[j * K + k];
 
                             if (k0 == 0) {
                                 if (accumulate)
@@ -206,40 +216,55 @@ void matmul_backward(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
 
-                    // grad_B (use transposed grad_out_T now)
-                    for (size_t i = j0; i < j_max; ++i) {  // i over K
-                        for (size_t j = k0; j < k_max; ++j) {  // j over N
-                            __m256 vsum_b = _mm256_setzero_ps();
-                            size_t k = i0;
-                            for (; k + 7 < i_max; k += 8) {
-                                float buf_a[8], buf_g[8];
-                                for (int x = 0; x < 8; ++x) {
-                                    buf_a[x] = A[b * M * K + (k + x) * K + i];
-                                    buf_g[x] = grad_out_T[b * N * M + j * M + (k + x)];
-                                }
-                                __m256 va = _mm256_loadu_ps(buf_a);
-                                __m256 vg = _mm256_loadu_ps(buf_g);
-                                vsum_b = _mm256_fmadd_ps(va, vg, vsum_b);
+    // Compute grad_B: batched GEMM reduced over batch, tiled AVX2 kernel (K x N)
+    if (grad_B != NULL) {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (size_t i = 0; i < K; i += TILE_K) {
+            for (size_t j = 0; j < N; j += TILE_N) {
+                size_t i_max = (i + TILE_K > K) ? K : i + TILE_K;
+                size_t j_max = (j + TILE_N > N) ? N : j + TILE_N;
+
+                for (size_t ii = i; ii < i_max; ++ii) {
+                    for (size_t jj = j; jj < j_max; ++jj) {
+                        float sum = 0.0f;
+                        // Use SIMD for the reduction over batch * M
+                        size_t b_m_total = batch * M;
+                        size_t k = 0;
+                        for (; k + 8 <= b_m_total; k += 8) {
+                            float buf_a[8];
+                            float buf_g[8];
+                            for (int x = 0; x < 8; ++x) {
+                                size_t idx = k + x;
+                                size_t b_idx = idx / M;
+                                size_t m_idx = idx % M;
+                                buf_a[x] = A[b_idx * M * K + m_idx * K + ii];
+                                buf_g[x] = grad_out[b_idx * M * N + m_idx * N + jj];
                             }
-
-                            float buf_b[8];
-                            _mm256_storeu_ps(buf_b, vsum_b);
-                            float sum_b = buf_b[0] + buf_b[1] + buf_b[2] + buf_b[3] +
-                                          buf_b[4] + buf_b[5] + buf_b[6] + buf_b[7];
-
-                            for (; k < i_max; ++k)
-                                sum_b += A[b * M * K + k * K + i] * grad_out_T[b * N * M + j * M + k];
-
-                            if (i0 == 0) {
-                                if (accumulate)
-                                    grad_B[b * K * N + i * N + j] += sum_b;
-                                else
-                                    grad_B[b * K * N + i * N + j] = sum_b;
-                            } else {
-                                grad_B[b * K * N + i * N + j] += sum_b;
-                            }
+                            __m256 va = _mm256_loadu_ps(buf_a);
+                            __m256 vg = _mm256_loadu_ps(buf_g);
+                            __m256 vmul = _mm256_mul_ps(va, vg);
+                            __m256 vsum = _mm256_hadd_ps(vmul, vmul);
+                            float temp[8];
+                            _mm256_storeu_ps(temp, vmul);
+                            for (int t = 0; t < 8; ++t)
+                                sum += temp[t];
                         }
+                        // Handle leftover
+                        for (; k < b_m_total; ++k) {
+                            size_t b_idx = k / M;
+                            size_t m_idx = k % M;
+                            sum += A[b_idx * M * K + m_idx * K + ii] * grad_out[b_idx * M * N + m_idx * N + jj];
+                        }
+
+                        if (accumulate)
+                            grad_B[ii * N + jj] += sum;
+                        else
+                            grad_B[ii * N + jj] = sum;
                     }
                 }
             }

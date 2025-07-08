@@ -28,38 +28,6 @@ float hmax256_ps(__m256 v) {
     return _mm_cvtss_f32(max128);
 }
 
-__m256 log256_ps(__m256 x) {
-    __m256 one = _mm256_set1_ps(1.0f);
-
-    // avoid log(0)
-    x = _mm256_max_ps(x, _mm256_set1_ps(1e-30f));
-
-    __m256i ix = _mm256_castps_si256(x);
-    __m256i exp = _mm256_srli_epi32(ix, 23);
-
-    __m256 e = _mm256_cvtepi32_ps(_mm256_sub_epi32(exp, _mm256_set1_epi32(127)));
-
-    __m256i mant_mask = _mm256_set1_epi32(0x007FFFFF);
-    __m256 mantissa = _mm256_or_ps(_mm256_castsi256_ps(_mm256_and_si256(ix, mant_mask)),
-                                   _mm256_castsi256_ps(_mm256_set1_epi32(0x3f800000)));
-
-    __m256 m = _mm256_sub_ps(mantissa, one);
-
-    // polynomial approx: log(1 + m)
-    __m256 p = _mm256_set1_ps(7.0376836292E-2f);
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.1514610310E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(1.1676998740E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.2420140846E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+1.4249322787E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-1.6668057665E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+2.0000714765E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(-2.4999993993E-1f));
-    p = _mm256_fmadd_ps(p, m, _mm256_set1_ps(+3.3333331174E-1f));
-    p = _mm256_mul_ps(p, m);
-
-    return _mm256_add_ps(_mm256_mul_ps(e, _mm256_set1_ps(0.69314718056f)), p);
-}
-
 __m256 exp256_ps(__m256 x) {
     const __m256 ln2 = _mm256_set1_ps(0.69314718056f);
     const __m256 inv_ln2 = _mm256_set1_ps(1.44269504089f);  // 1/ln(2)
@@ -156,18 +124,18 @@ float tensor_mean(const float* input, float* grad_out, size_t len) {
     return sum * inv_len;
 }
 
-void tensor_softmax_ce(
+void tensor_softmax_ce_backup(
     const float* logits,
-    const float* labels,
-    const float* grad_loss,  // Optional: NULL if not provided
+    const int* labels,
+    const float* grad_loss,
     float* losses,
     float* grad_input,
-    float* probs_out,        // Optional: NULL if not needed
+    float* probs_out,
     size_t batch,
     size_t class_count
 ) {
     if (!logits || !labels || !losses || !grad_input) {
-        fprintf(stderr, "Error: NULL pointer passed to tensor_softmax_ce_fused\n");
+        fprintf(stderr, "Error: NULL pointer passed to tensor_softmax_ce_intlabel\n");
         return;
     }
 
@@ -182,11 +150,10 @@ void tensor_softmax_ce(
     #pragma omp parallel for
     for (size_t b = 0; b < batch; ++b) {
         const float* logits_row = logits + b * class_count;
-        const float* labels_row = labels + b * class_count;
         float* probs_row = probs_out ? probs_out + b * class_count : NULL;
         float* grad_row = grad_input + b * class_count;
 
-        // Find max value for numerical stability
+        // Find max value
         __m256 v_max = _mm256_set1_ps(-FLT_MAX);
         size_t j = 0;
         for (; j + 8 <= class_count; j += 8) {
@@ -219,47 +186,169 @@ void tensor_softmax_ce(
             sum_exp += exp_val;
         }
 
-        __m256 v_sum_exp = _mm256_set1_ps(sum_exp);
-        __m256 v_recip = _mm256_rcp_ps(v_sum_exp);
-        v_recip = _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(2.0f), _mm256_mul_ps(v_sum_exp, v_recip)), v_recip);
+        __m256 v_sum_exp = _mm256_set1_ps(sum_exp);  // used in accurate division
 
-        float loss = 0.0f;
+        int true_idx = labels[b];
+        float prob_true = 0.0f;
         i = 0;
         for (; i + 8 <= class_count; i += 8) {
             __m256 v_probs = _mm256_loadu_ps(probs_row ? probs_row + i : logits_row + i);
-            v_probs = _mm256_mul_ps(v_probs, v_recip);  // Normalize
+            v_probs = _mm256_div_ps(v_probs, v_sum_exp);         // accurate normalization
+            v_probs = _mm256_max_ps(v_probs, v_epsilon);         // avoid log(0)
 
             if (probs_row) _mm256_storeu_ps(probs_row + i, v_probs);
 
-            __m256 v_labels = _mm256_loadu_ps(labels_row + i);
-            __m256 v_clamped = _mm256_max_ps(v_probs, v_epsilon);
-            __m256 v_log = log256_ps(v_clamped);
-            __m256 v_mul = _mm256_mul_ps(v_labels, v_log);
-            loss -= hsum256_ps(v_mul);
-
-            __m256 v_diff = _mm256_sub_ps(v_probs, v_labels);
-            if (grad_loss) {
-                __m256 v_grad_loss = _mm256_set1_ps(grad_loss[b]);
-                v_diff = _mm256_mul_ps(v_diff, v_grad_loss);
+            float tmp[8];
+            _mm256_storeu_ps(tmp, v_probs);
+            for (int k = 0; k < 8; ++k) {
+                size_t idx = i + k;
+                float prob = tmp[k];
+                if (idx == (size_t)true_idx) prob_true = prob;
+                float grad_val = prob - (idx == (size_t)true_idx ? 1.0f : 0.0f);
+                if (grad_loss) grad_val *= grad_loss[b];
+                grad_row[idx] = grad_val;
             }
-            _mm256_storeu_ps(grad_row + i, v_diff);
         }
 
-        // Handle tail
         for (; i < class_count; ++i) {
             float prob = probs_row ? probs_row[i] : expf(logits_row[i] - max_val);
             prob /= sum_exp;
+            if (prob < epsilon) prob = epsilon;
             if (probs_row) probs_row[i] = prob;
 
-            float label = labels_row[i];
-            float clamped = fmaxf(prob, epsilon);
-            loss -= label * logf(clamped);
+            if ((size_t)i == (size_t)true_idx) prob_true = prob;
 
-            float grad_val = prob - label;
+            float grad_val = prob - ((size_t)i == (size_t)true_idx ? 1.0f : 0.0f);
             if (grad_loss) grad_val *= grad_loss[b];
             grad_row[i] = grad_val;
         }
 
-        losses[b] = loss;
+        losses[b] = -logf(prob_true < epsilon ? epsilon : prob_true);
+        if (grad_loss) losses[b] *= grad_loss[b];
+    }
+}
+
+void tensor_softmax_ce(
+    const float* logits,
+    const int* labels,
+    const float* grad_loss,
+    float* losses,
+    float* grad_input,
+    float* probs_out,
+    size_t batch,
+    size_t class_count,
+    float label_smoothing,
+    int use_label_smoothing
+) {
+    if (!logits || !labels || !losses || !grad_input) {
+        fprintf(stderr, "Error: NULL pointer passed to tensor_softmax_ce\n");
+        return;
+    }
+
+    if (class_count > MAX_CLASSES) {
+        fprintf(stderr, "Error: class_count %zu exceeds MAX_CLASSES (%d)\n", class_count, MAX_CLASSES);
+        return;
+    }
+
+    const float epsilon = 1e-8f;
+    const __m256 v_epsilon = _mm256_set1_ps(epsilon);
+
+    #pragma omp parallel for
+    for (size_t b = 0; b < batch; ++b) {
+        const float* logits_row = logits + b * class_count;
+        float* probs_row = probs_out ? probs_out + b * class_count : NULL;
+        float* grad_row = grad_input + b * class_count;
+
+        // Step 1: Find max for numerical stability
+        __m256 v_max = _mm256_set1_ps(-FLT_MAX);
+        size_t j = 0;
+        for (; j + 8 <= class_count; j += 8) {
+            __m256 v_logits = _mm256_loadu_ps(logits_row + j);
+            v_max = _mm256_max_ps(v_max, v_logits);
+        }
+
+        float max_val = hmax256_ps(v_max);
+        for (; j < class_count; ++j) {
+            if (logits_row[j] > max_val)
+                max_val = logits_row[j];
+        }
+
+        v_max = _mm256_set1_ps(max_val);
+
+        // Step 2: Compute exp(logits - max) and sum
+        float sum_exp = 0.0f;
+        size_t i = 0;
+        for (; i + 8 <= class_count; i += 8) {
+            __m256 v_logits = _mm256_loadu_ps(logits_row + i);
+            __m256 v_shifted = _mm256_sub_ps(v_logits, v_max);
+            __m256 v_exp = exp256_ps(v_shifted);
+            if (probs_row) _mm256_storeu_ps(probs_row + i, v_exp);
+            sum_exp += hsum256_ps(v_exp);
+        }
+
+        for (; i < class_count; ++i) {
+            float exp_val = expf(logits_row[i] - max_val);
+            if (probs_row) probs_row[i] = exp_val;
+            sum_exp += exp_val;
+        }
+
+        __m256 v_sum_exp = _mm256_set1_ps(sum_exp);
+
+        int true_idx = labels[b];
+        float prob_true = 0.0f;
+
+        float on_target = 1.0f;
+        float off_target = 0.0f;
+        if (use_label_smoothing) {
+            on_target = 1.0f - label_smoothing;
+            off_target = label_smoothing / (float)(class_count - 1);
+        }
+
+        // Step 3: Normalize probs, apply log, compute gradient
+        i = 0;
+        for (; i + 8 <= class_count; i += 8) {
+            __m256 v_probs = _mm256_loadu_ps(probs_row ? probs_row + i : logits_row + i);
+            v_probs = _mm256_div_ps(v_probs, v_sum_exp);
+            v_probs = _mm256_max_ps(v_probs, v_epsilon); // Avoid log(0)
+
+            if (probs_row) _mm256_storeu_ps(probs_row + i, v_probs);
+
+            float tmp[8];
+            _mm256_storeu_ps(tmp, v_probs);
+            for (int k = 0; k < 8; ++k) {
+                size_t idx = i + k;
+                float prob = tmp[k];
+                if (idx == (size_t)true_idx) prob_true = prob;
+
+                float target = (idx == (size_t)true_idx) ? on_target : off_target;
+                float grad_val = prob - target;
+                if (grad_loss) grad_val *= grad_loss[b];
+                grad_row[idx] = grad_val;
+            }
+        }
+
+        for (; i < class_count; ++i) {
+            float prob = probs_row ? probs_row[i] : expf(logits_row[i] - max_val);
+            prob /= sum_exp;
+            if (prob < epsilon) prob = epsilon;
+            if (probs_row) probs_row[i] = prob;
+            if (i == true_idx) prob_true = prob;
+
+            float target = (i == true_idx) ? on_target : off_target;
+            float grad_val = prob - target;
+            if (grad_loss) grad_val *= grad_loss[b];
+            grad_row[i] = grad_val;
+        }
+
+        // Step 4: Compute loss
+        float loss = 0.0f;
+        for (size_t c = 0; c < class_count; ++c) {
+            float prob = probs_row ? probs_row[c] : expf(logits_row[c] - max_val) / sum_exp;
+            prob = fmaxf(prob, epsilon);
+            float target = (c == true_idx) ? on_target : off_target;
+            loss += -target * logf(prob);
+        }
+
+        losses[b] = grad_loss ? (loss * grad_loss[b]) : loss;
     }
 }

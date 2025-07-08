@@ -35,9 +35,9 @@ float tensor_mean(const float* input, float* grad_out, size_t len);
 // - losses: output loss per batch item
 // - grad_input: gradient w.r.t. logits
 // - probs_out: optional output for softmax probs (or NULL)
-void tensor_softmax_ce(
+void tensor_softmax_ce_backup(
     const float* logits,
-    const float* labels,
+    const int* labels,
     const float* grad_loss,  // Optional: NULL if not provided
     float* losses,
     float* grad_input,
@@ -46,5 +46,17 @@ void tensor_softmax_ce(
     size_t class_count
 );
 
+void tensor_softmax_ce(
+    const float* logits,
+    const int* labels,
+    const float* grad_loss,
+    float* losses,
+    float* grad_input,
+    float* probs_out,
+    size_t batch,
+    size_t class_count,
+    float label_smoothing,
+    int use_label_smoothing
+);
 
 #endif // TENSOR_REDUCTIONS_H

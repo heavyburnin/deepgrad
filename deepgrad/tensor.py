@@ -1,7 +1,10 @@
 from deepgrad.backend import SimdTensorBackend
-from ctypes import c_float, c_size_t, Array
+from ctypes import c_float, c_size_t, Array, cast, POINTER, c_int
 from deepgrad.broadcast import compute_broadcast_shape, broadcast_to_shape, unbroadcast_grad
 from deepgrad.ops import get_op_names
+from functools import reduce
+from operator import mul
+import random
 
 class Tensor:
     def __init__(self, data, requires_grad=False, shape=None, size=None):
@@ -183,10 +186,43 @@ class Tensor:
     def __pow__(self, other): return self._binary_op(other, 'pow')
     def __rpow__(self, other): return Tensor(other, requires_grad=False).__pow__(self)
 
-    def reshape(self, new_shape):
-        from functools import reduce
-        from operator import mul
+    def reshape_bak(self, new_shape):
+        inferred_index = -1
+        known_product = 1
 
+        # Compute known product and track inferred index
+        for i, dim in enumerate(new_shape):
+            if dim == -1:
+                if inferred_index != -1:
+                    raise AssertionError("Only one dimension can be inferred")
+                inferred_index = i
+            else:
+                known_product *= dim
+
+        original_product = 1
+        for dim in self.shape:
+            original_product *= dim
+
+        # Compute inferred dimension if any
+        if inferred_index != -1:
+            if original_product % known_product != 0:
+                raise AssertionError("Inferred dimension must divide total size")
+            inferred = original_product // known_product
+            # Replace inferred dimension in a tuple without creating intermediate list
+            new_shape = tuple(
+                inferred if i == inferred_index else dim
+                for i, dim in enumerate(new_shape)
+            )
+
+        # Verify total size consistency
+        total = 1
+        for dim in new_shape:
+            total *= dim
+        assert total == original_product, "Reshape must preserve total size"
+
+        return Tensor(self.data, shape=new_shape, size=original_product, requires_grad=self.requires_grad)
+
+    def reshape(self, new_shape):
         inferred = -1
         known_product = 1
         inferred_index = -1
@@ -335,11 +371,11 @@ class Tensor:
 
         # --- Shape info ---
         N, C, H, W = self.shape
-        H_out = (H - kernel_h + stride_h) // stride_h
-        W_out = (W - kernel_w + stride_w) // stride_w
+        H_out = (H - kernel_h) // stride_h + 1 if H >= kernel_h else 0
+        W_out = (W - kernel_w) // stride_w + 1 if W >= kernel_w else 0
         out_size = N * C * H_out * W_out
-
         out_data = (c_float * out_size)()
+
 
         # --- Forward ---
         SimdTensorBackend.maxpool2d_forward(
@@ -394,7 +430,7 @@ class Tensor:
 
         return out
     
-    def cross_entropy(self, target):
+    def cross_entropy_back(self, target):
         assert self.shape == target.shape, f"Shape mismatch: {self.shape} vs {target.shape}"
         B, C = self.shape
         loss_data = (c_float * B)()
@@ -426,6 +462,57 @@ class Tensor:
                         None,
                         B,
                         C
+                    )
+            loss._backward = _backward
+            loss._prev = [self, target]
+
+        return loss.mean()
+
+    def cross_entropy(self, target, label_smoothing=0.0, use_label_smoothing=0):
+        # self: logits of shape (B, C)
+        # target: integer class labels of shape (B,)
+        B, C = self.shape
+
+        if target.shape == (B,):
+            label_is_int = True
+        else:
+            raise ValueError(f"cross_entropy() expects target to be class indices of shape ({B},), got {target.shape}")
+
+        loss_data = (c_float * B)()
+        grad_input = (c_float * (B * C))()
+        probs_data = (c_float * (B * C))()
+
+        # Forward pass: grad_loss is None
+        SimdTensorBackend.tensor_softmax_ce(
+            self.data,
+            cast(target.data, POINTER(c_int)) if label_is_int else target.data,
+            None,                # grad_loss
+            loss_data,
+            grad_input,
+            probs_data,
+            B,
+            C,
+            c_float(label_smoothing),
+            c_int(use_label_smoothing)
+        )
+
+        loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,), size=B)
+
+        if loss.requires_grad:
+            def _backward():
+                if self.requires_grad:
+                    # Backward pass: pass grad_loss as loss.grad
+                    SimdTensorBackend.tensor_softmax_ce(
+                        self.data,
+                        cast(target.data, POINTER(c_int)) if label_is_int else target.data,
+                        loss.grad,
+                        loss_data,
+                        self.grad,
+                        None,
+                        B,
+                        C,
+                        c_float(label_smoothing),
+                        c_int(use_label_smoothing)
                     )
             loss._backward = _backward
             loss._prev = [self, target]
@@ -511,8 +598,14 @@ class Tensor:
 
         if out.requires_grad:
             def _backward():
-                if self.requires_grad:
+                if self.requires_grad and out.grad is not None:
                     SimdTensorBackend.tensor_sum(self.data, self.grad, self.size)
+
+                    # Then scale self.grad by upstream scalar gradient
+                    scalar_grad = out.grad[0]
+                    for i in range(self.size):
+                        self.grad[i] *= scalar_grad
+
             out._backward = _backward
             out._prev = [self]
 
@@ -526,12 +619,59 @@ class Tensor:
 
         if out.requires_grad:
             def _backward():
-                if self.requires_grad:
+                if self.requires_grad and out.grad is not None:
+                    # First, call tensor_mean with grad_out=self.grad to fill gradients scaled by 1/N
                     SimdTensorBackend.tensor_mean(self.data, self.grad, self.size)
+                    
+                    # Then scale self.grad by upstream scalar gradient
+                    scalar_grad = out.grad[0]
+                    for i in range(self.size):
+                        self.grad[i] *= scalar_grad
+
             out._backward = _backward
             out._prev = [self]
 
         return out
+
+    def clone(self):
+        cloned_data = (c_float * self.size)()
+        for i in range(self.size):
+            cloned_data[i] = self.data[i]
+
+        return Tensor(cloned_data, requires_grad=self.requires_grad, shape=self.shape, size=self.size)
+
+    def detach(self):
+        """
+        Returns a new tensor sharing the same data, but without tracking gradients
+        or graph connections. Detaches from the computation graph.
+        """
+        return Tensor(
+            data=self.data,
+            requires_grad=False,
+            shape=self.shape,
+            size=self.size
+        )
+
+    def dropout(self, p):
+        if not self.requires_grad or p <= 0:
+            return self
+
+        scale = 1.0 / (1.0 - p)
+        size = self.size
+        shape = self.shape
+
+        # Allocate mask array as a ctypes float array
+        MaskArrayType = c_float * size
+        mask_array = MaskArrayType()
+
+        # Apply scaled dropout mask directly
+        for i in range(size):
+            mask_array[i] = scale if random.random() > p else 0.0
+
+        # Create mask tensor with scaled values
+        mask_tensor = Tensor(mask_array, requires_grad=False, shape=shape, size=size)
+
+        return self * mask_tensor
 
     def backward(self):
         visited = set()

@@ -12,7 +12,6 @@
 
 #define MAX(a,b) (((a) > (b)) ? (a) : (b))
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#define MATMUL_FORWARD 0
 
 static float* cached_im2col = NULL;
 static size_t cached_im2col_size = 0;
@@ -121,8 +120,7 @@ void conv2d_forward_gemm(const float* input, const float* weight, const float* b
                       pad_h, pad_w, stride_h, stride_w, H_out, W_out);
     }
 
-    tensor_matmul(MATMUL_FORWARD, im2col_buf, weight, NULL, output, NULL,
-                  N, M, K, C_out, false);
+    matmul_forward(im2col_buf, weight, output, N, M, K, C_out);
 
     if (bias) {
         #pragma omp parallel for
@@ -165,11 +163,10 @@ void conv2d_backward_gemm(const float* input, const float* weight, const float* 
                       pad_h, pad_w, stride_h, stride_w, H_out, W_out);
     }
 
-    tensor_matmul(MATMUL_FORWARD, im2col_buf, grad_out, NULL, grad_weight, NULL,
-                  N, K, M, C_out, true);
+    matmul_backward(im2col_buf, grad_out, NULL, grad_weight, NULL,
+                N, K, M, C_out, true);
 
-    tensor_matmul(MATMUL_FORWARD, grad_out, weight, NULL, grad_im2col, NULL,
-                  N, M, C_out, K, false);
+    matmul_forward(grad_out, weight, grad_im2col, N, M, C_out, K);
 
     #pragma omp parallel for
     for (size_t n = 0; n < N; ++n) {

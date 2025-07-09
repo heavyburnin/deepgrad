@@ -478,16 +478,12 @@ class Tensor:
         out_size = batch * M * N
         out_data = (c_float * out_size)()
 
-        # Forward
-        SimdTensorBackend.tensor_matmul(
-            0,  # MATMUL_FORWARD
+        # Forward call
+        SimdTensorBackend.matmul_forward(
             self.data,
             other.data,
-            None,
             out_data,
-            None,
-            batch, M, K, N,
-            False
+            batch, M, K, N
         )
 
         out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape, size=out_size)
@@ -497,21 +493,19 @@ class Tensor:
                 if out.grad is None:
                     return
 
-                # Allocate grad buffers on-demand
                 if self.requires_grad and self.grad is None:
                     self.grad = (c_float * (batch * M * K))()
                 if other.requires_grad and other.grad is None:
                     other.grad = (c_float * (K * N))()
 
-                SimdTensorBackend.tensor_matmul(
-                    1,  # MATMUL_BACKWARD
+                SimdTensorBackend.matmul_backward(
                     self.data,
                     other.data,
                     out.grad,
                     self.grad if self.requires_grad else None,
                     other.grad if other.requires_grad else None,
                     batch, M, K, N,
-                    True
+                    True  # accumulate
                 )
 
             out._backward = _backward

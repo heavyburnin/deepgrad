@@ -127,7 +127,7 @@ if __name__ == '__main__':
     total_batches = (NUM_TRAIN_SAMPLES + BATCH_SIZE - 1) // BATCH_SIZE
     total_steps = total_batches * PASSES
 
-    opt = AdamW(model.parameters(), lr=0.001, beta1=0.9, beta2=0.99, weight_decay=0.001)
+    opt = AdamW(model.parameters(), lr=0.001, beta1=0.9, beta2=0.99, weight_decay=0.0005)
     # opt = AdamW(model.parameters(), lr=0.001, beta1=0.9, beta2=0.99)
     # scheduler = LinearDecayLR(opt, start_lr=0.009, end_lr=0.004, total_steps=total_steps)
 

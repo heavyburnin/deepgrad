@@ -37,6 +37,11 @@ void tensor_matmul_free_cache() {
 }
 
 void matmul_forward(const float* A, const float* B, float* C, size_t batch, size_t M, size_t K, size_t N) {
+    if (!matmul_cache_cleanup_registered) {
+        atexit(tensor_matmul_free_cache);
+        matmul_cache_cleanup_registered = true;
+    }
+
     float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
     if (!B_T) { fprintf(stderr, "Error: Memory allocation failed for B_T\n"); return; }
 
@@ -71,6 +76,11 @@ void matmul_forward(const float* A, const float* B, float* C, size_t batch, size
 }
 
 void matmul_backward(const float* A, const float* B, const float* grad_out, float* grad_A, float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
+    if (!matmul_cache_cleanup_registered) {
+        atexit(tensor_matmul_free_cache);
+        matmul_cache_cleanup_registered = true;
+    }
+
     float* B_T = get_cached_buffer(&cached_B_T, &cached_B_T_size, K * N);
     if (!B_T) { fprintf(stderr, "Error: Memory allocation failed for B_T\n"); return; }
 
@@ -125,18 +135,3 @@ void matmul_backward(const float* A, const float* B, const float* grad_out, floa
     }
 }
 
-void tensor_matmul(PassMode mode, const float* A, const float* B, const float* grad_out, float* C_or_A, float* grad_B, size_t batch, size_t M, size_t K, size_t N, bool accumulate) {
-    if (!A || !B || !C_or_A || (mode == MATMUL_BACKWARD && !grad_out)) {
-        fprintf(stderr, "Error: NULL pointer in tensor_matmul\n");
-        return;
-    }
-    if (mode == MATMUL_FORWARD) {
-        matmul_forward(A, B, C_or_A, batch, M, K, N);
-    } else {
-        matmul_backward(A, B, grad_out, C_or_A, grad_B, batch, M, K, N, accumulate);
-    }
-    if (!matmul_cache_cleanup_registered) {
-        atexit(tensor_matmul_free_cache);
-        matmul_cache_cleanup_registered = true;
-    }
-}

@@ -125,7 +125,7 @@ class FashionConvNet:
             lambda x: x.reshape((x.shape[0], -1)),
             lambda x: x.matmul(self.w3) + self.b3,
             Tensor.relu,
-            lambda x: x.dropout(0.5) if self.training else x,
+            lambda x: x.dropout(0.3) if self.training else x,
 
             lambda x: x.matmul(self.w4) + self.b4
         ]

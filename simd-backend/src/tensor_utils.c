@@ -14,7 +14,7 @@ float* get_cached_buffer(float** buf, size_t* current_size, size_t required_size
 
     if (*current_size < padded_size) {
         if (*buf) _mm_free(*buf);
-        *buf = (float*)_mm_malloc(padded_size * sizeof(float), 64);
+        *buf = (float*)_mm_malloc(padded_size * sizeof(float), 32);
         if (!*buf) {
             fprintf(stderr, "Error: Memory allocation failed\n");
             *current_size = 0;

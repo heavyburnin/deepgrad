@@ -71,25 +71,24 @@ float tensor_sum(const float* input, float* grad_out, size_t len) {
 
     #pragma omp parallel reduction(+:total_sum)
     {
-        __m256 vsum = _mm256_setzero_ps();
+        float local_sum = 0.0f;
 
-        #pragma omp for schedule(static) nowait
+        #pragma omp for schedule(static)
         for (size_t i = 0; i < vec_end; i += 8) {
             __m256 v = _mm256_loadu_ps(input + i);
-            vsum = _mm256_add_ps(vsum, v);
-
-            // Optional: write gradient directly
-            if (grad_out) {
-                _mm256_storeu_ps(grad_out + i, _mm256_set1_ps(1.0f));  // d(sum)/dx = 1
-            }
+            __m256 ones = _mm256_set1_ps(1.0f);
+            if (grad_out) _mm256_storeu_ps(grad_out + i, ones);
+            // Horizontal sum of v
+            float tmp[8];
+            _mm256_storeu_ps(tmp, v);
+            for (int j = 0; j < 8; ++j) local_sum += tmp[j];
         }
 
-        float partial = hsum256_ps(vsum);
-        total_sum += partial;
+        total_sum += local_sum;  // Correct: OpenMP reduction of thread-local scalar
     }
 
-    // Handle tail
-    for (size_t i = vec_end; i < len; i++) {
+    // Handle remainder
+    for (size_t i = vec_end; i < len; ++i) {
         total_sum += input[i];
         if (grad_out) grad_out[i] = 1.0f;
     }
@@ -259,7 +258,7 @@ void tensor_softmax_ce(
         float* probs_row = probs_out ? probs_out + b * class_count : NULL;
         float* grad_row = grad_input + b * class_count;
 
-        // Step 1: Find max for numerical stability
+        // Step 1: Find max
         __m256 v_max = _mm256_set1_ps(-FLT_MAX);
         size_t j = 0;
         for (; j + 8 <= class_count; j += 8) {
@@ -275,7 +274,7 @@ void tensor_softmax_ce(
 
         v_max = _mm256_set1_ps(max_val);
 
-        // Step 2: Compute exp(logits - max) and sum
+        // Step 2: exp and sum
         float sum_exp = 0.0f;
         size_t i = 0;
         for (; i + 8 <= class_count; i += 8) {
@@ -295,7 +294,7 @@ void tensor_softmax_ce(
         __m256 v_sum_exp = _mm256_set1_ps(sum_exp);
 
         int true_idx = labels[b];
-        float prob_true = 0.0f;
+        size_t true_idx_u = (size_t)true_idx;
 
         float on_target = 1.0f;
         float off_target = 0.0f;
@@ -304,12 +303,12 @@ void tensor_softmax_ce(
             off_target = label_smoothing / (float)(class_count - 1);
         }
 
-        // Step 3: Normalize probs, apply log, compute gradient
+        // Step 3: normalize + gradient
         i = 0;
         for (; i + 8 <= class_count; i += 8) {
             __m256 v_probs = _mm256_loadu_ps(probs_row ? probs_row + i : logits_row + i);
             v_probs = _mm256_div_ps(v_probs, v_sum_exp);
-            v_probs = _mm256_max_ps(v_probs, v_epsilon); // Avoid log(0)
+            v_probs = _mm256_max_ps(v_probs, v_epsilon);
 
             if (probs_row) _mm256_storeu_ps(probs_row + i, v_probs);
 
@@ -318,9 +317,7 @@ void tensor_softmax_ce(
             for (int k = 0; k < 8; ++k) {
                 size_t idx = i + k;
                 float prob = tmp[k];
-                if (idx == (size_t)true_idx) prob_true = prob;
-
-                float target = (idx == (size_t)true_idx) ? on_target : off_target;
+                float target = (idx == true_idx_u) ? on_target : off_target;
                 float grad_val = prob - target;
                 if (grad_loss) grad_val *= grad_loss[b];
                 grad_row[idx] = grad_val;
@@ -332,20 +329,19 @@ void tensor_softmax_ce(
             prob /= sum_exp;
             if (prob < epsilon) prob = epsilon;
             if (probs_row) probs_row[i] = prob;
-            if (i == true_idx) prob_true = prob;
 
-            float target = (i == true_idx) ? on_target : off_target;
+            float target = (i == true_idx_u) ? on_target : off_target;
             float grad_val = prob - target;
             if (grad_loss) grad_val *= grad_loss[b];
             grad_row[i] = grad_val;
         }
 
-        // Step 4: Compute loss
+        // Step 4: loss
         float loss = 0.0f;
         for (size_t c = 0; c < class_count; ++c) {
             float prob = probs_row ? probs_row[c] : expf(logits_row[c] - max_val) / sum_exp;
             prob = fmaxf(prob, epsilon);
-            float target = (c == true_idx) ? on_target : off_target;
+            float target = (c == true_idx_u) ? on_target : off_target;
             loss += -target * logf(prob);
         }
 

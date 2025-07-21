@@ -50,7 +50,7 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
             size_t idx = i + j*VEC_SIZE;
             __m256 vinput = _mm256_loadu_ps(input + idx);
             __m256 vgrad = _mm256_loadu_ps(grad_output + idx);
-            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);
+            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GE_OQ);
             __m256 vresult = _mm256_and_ps(vgrad, vmask);
             __m256 vprev = _mm256_loadu_ps(grad_input + idx);
             __m256 vsum = _mm256_add_ps(vprev, vresult);
@@ -61,7 +61,7 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
     for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
         __m256 vinput = _mm256_loadu_ps(input + i);
         __m256 vgrad = _mm256_loadu_ps(grad_output + i);
-        __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);
+        __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GE_OQ);
         __m256 vresult = _mm256_and_ps(vgrad, vmask);
         __m256 vprev = _mm256_loadu_ps(grad_input + i);
         __m256 vsum = _mm256_add_ps(vprev, vresult);
@@ -69,6 +69,6 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
     }
     
     for (; i < n; i++) {
-        grad_input[i] += input[i] > 0.0f ? grad_output[i] : 0.0f;
+        grad_input[i] += input[i] >= 0.0f ? grad_output[i] : 0.0f;
     }
 }

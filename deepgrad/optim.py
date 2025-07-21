@@ -1,6 +1,36 @@
+"""
+Optimizer Module (SGD, Adam, AdamW)
+
+This module provides high-performance optimizers accelerated by a SIMD C backend.
+All optimizers are compatible with the DeepGrad `Tensor` objects and require
+parameters to support `.data`, `.grad`, `.size`, and `.requires_grad`.
+
+Each optimizer supports:
+- `step()`: Applies parameter updates based on gradients.
+- `zero_grad_c()`: Clears gradients using the SIMD backend.
+- `set_lr(new_lr)`: Dynamically updates the learning rate.
+
+Example Usage:
+--------------
+from deepgrad.optim import Adam
+from deepgrad.model import MyModel
+from deepgrad.tensor import Tensor
+
+# Assuming model.parameters() returns a list of Tensor objects
+optimizer = Adam(model.parameters(), lr=0.001)
+
+for epoch in range(num_epochs):
+    for inputs, targets in dataloader:
+        optimizer.zero_grad_c()
+        loss = model(inputs).loss(targets)
+        loss.backward()
+        optimizer.step()
+"""
+
 from deepgrad.backend import SimdTensorBackend
 from ctypes import c_float, c_int
 
+# --- SGD ---
 class SGD:
     def __init__(self, parameters, lr=0.01):
         self.parameters = parameters
@@ -27,6 +57,7 @@ class SGD:
     def set_lr(self, new_lr):
         self.lr = new_lr
 
+# --- Adam ---
 class Adam:
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.99, eps=1e-8):
         self.parameters = parameters
@@ -64,7 +95,8 @@ class Adam:
 
     def set_lr(self, new_lr):
         self.lr = new_lr
-        
+
+# --- AdamW ---
 class AdamW:
     def __init__(self, parameters, lr=0.001, beta1=0.9, beta2=0.99, eps=1e-8, weight_decay=0.001):
         self.parameters = parameters

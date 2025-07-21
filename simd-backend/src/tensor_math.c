@@ -90,7 +90,7 @@ void tensor_add(const float* a, const float* b, float* out, size_t n, size_t bat
     }
 
     // Total number of elements across all batches
-    const size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     const size_t vec_end = total_elements - (total_elements % 8);
 
     // Parallelize over batches and elements
@@ -114,7 +114,7 @@ void tensor_add_grad(const float* dout, const float* a, const float* b, float* d
     }
 
     // Total number of elements across all batches
-    const size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     const size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -141,7 +141,7 @@ void tensor_sub(const float* a, const float* b, float* out, size_t n, size_t bat
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -162,7 +162,7 @@ void tensor_sub_grad(const float* dout, const float* a, const float* b, float* d
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -188,7 +188,7 @@ void tensor_mul(const float* a, const float* b, float* out, size_t n, size_t bat
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -209,7 +209,7 @@ void tensor_mul_grad(const float* dout, const float* a, const float* b, float* d
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -237,7 +237,7 @@ void tensor_div(const float* a, const float* b, float* out, size_t n, size_t bat
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -258,7 +258,7 @@ void tensor_div_grad(const float* dout, const float* a, const float* b, float* d
         return;
     }
 
-    size_t total_elements = batch_size * n;
+    size_t total_elements = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total_elements - (total_elements % 8);
 
     #pragma omp parallel for schedule(static) if (total_elements > 10000)
@@ -289,7 +289,8 @@ void tensor_exp(const float* a, float* out, size_t n, size_t batch_size) {
         return;
     }
 
-    size_t total = batch_size * n;
+    size_t total = (batch_size == 0) ? n : (batch_size * n);
+
     size_t vec_end = total - (total % 8);
 
     #pragma omp parallel for schedule(static) if (total > 10000)
@@ -309,7 +310,7 @@ void tensor_exp_grad(const float* dout, const float* a, float* da, size_t n, siz
         return;
     }
 
-    size_t total = batch_size * n;
+    size_t total = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total - (total % 8);
 
     #pragma omp parallel for schedule(static) if (total > 10000)
@@ -332,7 +333,7 @@ void tensor_pow(const float* base, const float* exponent, float* out, size_t n, 
         return;
     }
 
-    size_t total = batch_size * n;
+    size_t total = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total - (total % 8);
 
     #pragma omp parallel for schedule(static) if (total > 10000)
@@ -361,7 +362,7 @@ void tensor_pow_grad(const float* dout, const float* base, const float* exponent
         return;
     }
 
-    size_t total = batch_size * n;
+    size_t total = (batch_size == 0) ? n : (batch_size * n);
     size_t vec_end = total - (total % 8);
 
     #pragma omp parallel for schedule(static) if (total > 10000)

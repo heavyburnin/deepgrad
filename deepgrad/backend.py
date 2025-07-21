@@ -104,7 +104,7 @@ function_signatures = {
                              c_size_t,   # pad_h
                              c_size_t,   # pad_w
                              ], None),
-
+   
    'avgpool2d_forward': ([c_float_p,  # input
                            c_float_p,  # output
                            c_size_t,   # N

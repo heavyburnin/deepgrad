@@ -109,7 +109,7 @@ def save_model(model, filepath):
 # --- Main ---
 INPUT_SIZE = 784
 BATCH_SIZE = 256
-PASSES = 50
+PASSES = 25
 NUM_TRAIN_SAMPLES = 60000
 NUM_TEST_SAMPLES = 10000
 x_array = (c_float * (BATCH_SIZE * INPUT_SIZE))()

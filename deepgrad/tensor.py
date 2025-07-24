@@ -133,10 +133,10 @@ class Tensor:
         """Gradient buffer, initialized with zeros if None and requires_grad is True."""
         if not self.requires_grad:
             return None
-        if self._grad is None:
+        if self._grad is None and hasattr(self, '_backward') and self._backward is not None:
             self._grad = (c_float * self.size)(0.0)
         return self._grad
-
+    
     @grad.setter
     def grad(self, value):
         self._grad = value
@@ -310,12 +310,12 @@ class Tensor:
 
         return out
 
-    def flatten(self, start_dim: int = 1) -> 'Tensor':
+    def flatten(self, start_dim: int = 0) -> 'Tensor':
         """
         Flattens the tensor starting from `start_dim` into a single dimension.
 
         Args:
-            start_dim (int): Dimension to start flattening from (default: 1).
+            start_dim (int): Dimension to start flattening from (default: 0).
 
         Returns:
             A new Tensor with flattened dimensions.
@@ -328,22 +328,12 @@ class Tensor:
 
         pre_shape = self.shape[:start_dim]
         flatten_size = reduce(mul, self.shape[start_dim:], 1)
-        new_shape = (*pre_shape, flatten_size)
-
-        flat_data = (c_float * self.size)()
-        for i in range(self.size):
-            flat_data[i] = self.data[i]
-
-        flat_grad = None
-        if self.requires_grad and self.grad is not None:
-            flat_grad = (c_float * self.size)()
-            for i in range(self.size):
-                flat_grad[i] = self.grad[i]
+        new_shape = pre_shape + (flatten_size,) if pre_shape else (flatten_size,)
 
         out = Tensor(
-            data=flat_data,
+            data=self.data,  # Share the data buffer
             shape=new_shape,
-            grad=flat_grad,
+            grad=self._grad,  # Share the grad buffer
             size=self.size,
             requires_grad=self.requires_grad
         )
@@ -357,6 +347,7 @@ class Tensor:
                 for i in range(self.size):
                     self.grad[i] += out.grad[i]
             out._backward = _backward
+            out._prev = [self]
 
         return out
 
@@ -570,12 +561,6 @@ class Tensor:
         return out
 
     def sum(self) -> 'Tensor':
-        """
-        Computes the sum of all elements in the tensor.
-
-        Returns:
-            Scalar tensor containing the sum.
-        """
         out_data = (c_float * 1)()
         result = SimdTensorBackend.tensor_sum(self.data, None, self.size)
         out_data[0] = result
@@ -585,6 +570,7 @@ class Tensor:
             def _backward():
                 if self.requires_grad and out.grad is not None:
                     scalar_grad = out.grad[0]
+                    # Each element contributes equally to the sum, so its gradient is 1 * scalar_grad
                     if self._grad is None:
                         self._grad = (c_float * self.size)(*[scalar_grad] * self.size)
                     else:
@@ -654,7 +640,7 @@ class Tensor:
         SimdTensorBackend.tensor_softmax_ce(
             self.data,
             target_ptr,
-            None,
+            None,             # No incoming grad for forward pass
             loss_data,
             grad_input,
             probs_data,
@@ -664,6 +650,7 @@ class Tensor:
             c_int(use_label_smoothing)
         )
 
+        # Per-sample loss
         loss = Tensor(loss_data, requires_grad=self.requires_grad, shape=(B,), size=B)
 
         if loss.requires_grad:
@@ -690,11 +677,14 @@ class Tensor:
                     self.grad[i] += tmp[i]
             loss._backward = _backward
 
-        return loss.mean()
+        # Mean loss *after* backward graph is set up
+        loss_mean = loss.mean()
+        loss_mean._prev = [loss]  # Link mean to loss for backward
+        return loss_mean
 
     def matmul(self, other: 'Tensor') -> 'Tensor':
         """
-        Performs matrix multiplication with another tensor.
+        Performs matrix multiplication with another tensor, supporting PyTorch-like broadcasting.
 
         Args:
             other: Tensor to multiply with.
@@ -710,43 +700,85 @@ class Tensor:
             raise ValueError("Operand must be a Tensor")
 
         s1, s2 = self.shape, other.shape
-        if len(s1) == 2 and len(s2) == 2:
-            M, K = s1
-            K2, N = s2
-            if K != K2:
-                raise ValueError(f"Incompatible matmul shapes {s1} and {s2}")
-            batch = 1
-        elif len(s1) == 3 and len(s2) == 2:
-            B, M, K = s1
-            K2, N = s2
-            if K != K2:
-                raise ValueError(f"Incompatible matmul shapes {s1} and {s2}")
-            batch = B
-        elif len(s1) == 2 and len(s2) == 3:
-            M, K = s1
-            B, K2, N = s2
-            if K != K2:
-                raise ValueError(f"Incompatible matmul shapes {s1} and {s2}")
-            batch = B
-        elif len(s1) == 3 and len(s2) == 3:
-            B, M, K = s1
-            B2, K2, N = s2
-            if B != B2 or K != K2:
-                raise ValueError(f"Incompatible matmul shapes {s1} and {s2}")
-            batch = B
-        else:
-            raise NotImplementedError(f"Unsupported shapes for matmul: {s1} @ {s2}")
+        d1, d2 = len(s1), len(s2)
 
-        out_shape = (batch, M, N) if batch > 1 else (M, N)
-        out_size = batch * M * N
+        # Handle scalar-like cases (e.g., (1,) @ (1,))
+        if d1 == 1 and d2 == 1 and s1[0] == 1 and s2[0] == 1:
+            out_data = (c_float * 1)(self.data[0] * other.data[0])
+            return Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=(), size=1)
+
+        # Handle 1D cases (dot product, vector-matrix, matrix-vector)
+        if d1 == 1 and d2 == 1:
+            if s1[0] != s2[0]:
+                raise ValueError(f"Incompatible dot product shapes {s1} and {s2}")
+            batch, M, K, N = 1, 1, s1[0], 1
+            out_shape = ()
+        elif d1 == 1 and d2 == 2:
+            if s1[0] != s2[0]:
+                raise ValueError(f"Incompatible shapes {s1} and {s2}")
+            batch, M, K, N = 1, 1, s1[0], s2[1]
+            out_shape = (N,)
+        elif d1 == 2 and d2 == 1:
+            if s1[1] != s2[0]:
+                raise ValueError(f"Incompatible shapes {s1} and {s2}")
+            batch, M, K, N = 1, s1[0], s1[1], 1
+            out_shape = (M,)
+        else:
+            # Normalize to at least 2D
+            s1 = (1,) * (max(2, d2) - d1) + s1
+            s2 = (1,) * (max(2, d1) - d2) + s2
+            d1, d2 = len(s1), len(s2)
+
+            # Validate matrix dimensions
+            M, K = s1[-2], s1[-1]
+            K2, N = s2[-2], s2[-1]
+            if K != K2:
+                raise ValueError(f"Incompatible matrix dimensions {s1}[-2:]={s1[-2:]} and {s2}[-2:]={s2[-2:]}")
+
+            # Broadcast batch dimensions
+            batch_dims = []
+            for b1, b2 in zip(s1[:-2], s2[:-2]):
+                if b1 == 1:
+                    batch_dims.append(b2)
+                elif b2 == 1:
+                    batch_dims.append(b1)
+                elif b1 == b2:
+                    batch_dims.append(b1)
+                else:
+                    raise ValueError(f"Incompatible batch dimensions {s1[:-2]} and {s2[:-2]}")
+            batch = 1 if not batch_dims else batch_dims[0] if len(batch_dims) == 1 else tuple(batch_dims)
+            out_shape = batch + (M, N) if isinstance(batch, tuple) else (batch, M, N) if batch != 1 else (M, N)
+
+        # Calculate output size
+        out_size = max(1, M * N * (batch if isinstance(batch, int) else batch[0] if batch else 1))
         out_data = (c_float * out_size)()
 
+        # Reshape inputs for backend
+        self_shape = batch + (M, K) if isinstance(batch, tuple) else (batch, M, K) if batch != 1 else (M, K)
+        other_shape = batch + (K, N) if isinstance(batch, tuple) else (batch, K, N) if batch != 1 else (K, N)
+        self_reshaped = self.reshape(self_shape)
+        other_reshaped = other.reshape(other_shape)
+
+        # Check for NaNs in inputs
+        for i in range(self_reshaped.size):
+            if not (-1e10 < self_reshaped.data[i] < 1e10):
+                print(f"Warning: NaN or extreme value in self.data at index {i}: {self_reshaped.data[i]}")
+        for i in range(other_reshaped.size):
+            if not (-1e10 < other_reshaped.data[i] < 1e10):
+                print(f"Warning: NaN or extreme value in other.data at index {i}: {other_reshaped.data[i]}")
+
+        # Perform matrix multiplication
         SimdTensorBackend.matmul_forward(
-            self.data,
-            other.data,
+            self_reshaped.data,
+            other_reshaped.data,
             out_data,
-            batch, M, K, N
+            batch if isinstance(batch, int) else batch[0], M, K, N
         )
+
+        # Check output for NaNs
+        for i in range(out_size):
+            if not (-1e10 < out_data[i] < 1e10):
+                print(f"Warning: NaN or extreme value in out_data at index {i}: {out_data[i]}")
 
         out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape, size=out_size)
 
@@ -755,59 +787,49 @@ class Tensor:
                 if out.grad is None:
                     raise RuntimeError("Output gradient is None before matmul_backward")
                 if self.requires_grad and self.grad is None:
-                    self.grad = (c_float * (batch * M * K))()
+                    self.grad = (c_float * self.size)()
                 if other.requires_grad and other.grad is None:
                     other.grad = (c_float * other.size)()
+
                 SimdTensorBackend.matmul_backward(
-                    self.data,
-                    other.data,
+                    self_reshaped.data,
+                    other_reshaped.data,
                     out.grad,
                     self.grad if self.requires_grad else None,
                     other.grad if other.requires_grad else None,
-                    batch, M, K, N,
-                    True
+                    batch if isinstance(batch, int) else batch[0], M, K, N,
+                    True  # Accumulate gradients
                 )
+
+                # Check gradients for NaNs
+                if self.requires_grad:
+                    for i in range(self.size):
+                        if not (-1e10 < self.grad[i] < 1e10):
+                            print(f"Warning: NaN or extreme value in self.grad at index {i}: {self.grad[i]}")
+                if other.requires_grad:
+                    for i in range(other.size):
+                        if not (-1e10 < other.grad[i] < 1e10):
+                            print(f"Warning: NaN or extreme value in other.grad at index {i}: {other.grad[i]}")
             out._backward = _backward
             out._prev = [self, other]
-            #out.grad = None
 
         return out
+    
+    def clone(self):
+        new_data = (c_float * self.size)(*[self.data[i] for i in range(self.size)])
+        out = Tensor(new_data, requires_grad=self.requires_grad, grad=None, shape=self.shape, size=self.size)
+        out._prev = []
+        out._backward = None
+        out.owns_data = True
+        return out
 
-    def clone(self) -> 'Tensor':
-        """
-        Creates a deep copy of the tensor's data and shape.
-
-        Returns:
-            A new Tensor with copied data, detached from the computation graph.
-        """
-        new_data = (c_float * self.size)()
-        for i in range(self.size):
-            new_data[i] = self.data[i]
-        
-        return Tensor(
-            data=new_data,
-            requires_grad=self.requires_grad,
-            shape=self.shape,
-            size=self.size
-        )
-
-    def detach(self) -> 'Tensor':
-        """
-        Creates a new tensor sharing the same data, detached from autograd.
-
-        Returns:
-            A new Tensor without gradient tracking.
-        """
-        out = Tensor(
-            data=self.data,
-            requires_grad=False,
-            shape=self.shape,
-            size=self.size
-        )
+    def detach(self):
+        out = Tensor(data=self.data, requires_grad=False, shape=self.shape,size=self.size,grad=None)
         out._backward = None
         out._prev = []
+        out._grad = None
         return out
-
+        
     def release(self) -> None:
         """
         Frees computation-related metadata and data buffer (if not a parameter).
@@ -819,11 +841,6 @@ class Tensor:
             self.data = None
 
     def release_graph(self) -> None:
-        """
-        Recursively releases autograd-related memory (backward, prev, grad).
-
-        Retains data unless explicitly marked disposable.
-        """
         visited: Set['Tensor'] = set()
         def _recurse(t: 'Tensor') -> None:
             if t in visited:
@@ -833,14 +850,14 @@ class Tensor:
                 _recurse(p)
             t._backward = None
             t._prev = []
-            t.grad = None
+            t._grad = None
             if getattr(t, "_release_data", False):
                 t.data = None
             for attr in ['_mask', '_cached_a_broadcasted', '_cached_b_broadcasted', '_batch_info']:
                 if hasattr(t, attr):
                     delattr(t, attr)
         _recurse(self)
-
+    
     def dropout(self, p: float) -> 'Tensor':
         """
         Applies dropout with probability p during training.
@@ -957,8 +974,9 @@ def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    data = (c_float * size)(1.0)
+    data = (c_float * size)(*[1.0] * size)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
+
 
 def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
     """
@@ -1009,6 +1027,8 @@ def from_ctypes(ptr, shape, size, requires_grad=False):
     t.requires_grad = requires_grad
     t.grad = None
     t._grad = None
+    t._prev = []
+    t._backward = None
     t.owns_data = False
     return t
 

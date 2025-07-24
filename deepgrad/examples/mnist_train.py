@@ -108,8 +108,8 @@ def save_model(model, filepath):
 
 # --- Main ---
 INPUT_SIZE = 784
-BATCH_SIZE = 512
-PASSES = 75
+BATCH_SIZE = 128
+PASSES = 10
 NUM_TRAIN_SAMPLES = 60000
 NUM_TEST_SAMPLES = 10000
 x_array = (c_float * (BATCH_SIZE * INPUT_SIZE))()
@@ -118,11 +118,11 @@ x_array_next = (c_float * (BATCH_SIZE * INPUT_SIZE))()  # Buffer for next batch
 y_array_next = (c_int * BATCH_SIZE)()  # Buffer for next batch
 
 if __name__ == '__main__':
-    train_bin = 'deepgrad/examples/datasets/fashion_mnist_train.bin'
-    test_bin = 'deepgrad/examples/datasets/fashion_mnist_test.bin'
+    train_bin = 'deepgrad/examples/datasets/mnist_train.bin'
+    test_bin = 'deepgrad/examples/datasets/mnist_test.bin'
     if not os.path.exists(train_bin) or not os.path.exists(test_bin):
-        convert_csv_to_bin('deepgrad/examples/datasets/fashion_mnist_train.csv', train_bin, normalize=True)
-        convert_csv_to_bin('deepgrad/examples/datasets/fashion_mnist_test.csv', test_bin, normalize=True)
+        convert_csv_to_bin('deepgrad/examples/datasets/mnist_train.csv', train_bin, normalize=True)
+        convert_csv_to_bin('deepgrad/examples/datasets/mnist_test.csv', test_bin, normalize=True)
 
     mm_train, NUM_TRAIN_SAMPLES, _ = load_bin_dataset(train_bin, NUM_TRAIN_SAMPLES, INPUT_SIZE)
     mm_test, NUM_TEST_SAMPLES, _ = load_bin_dataset(test_bin, NUM_TEST_SAMPLES, INPUT_SIZE)

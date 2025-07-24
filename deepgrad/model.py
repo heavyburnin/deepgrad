@@ -48,7 +48,7 @@ class MNISTConvNet:
         x = (x.matmul(self.w3) + self.b3).relu()
 
         if self.training:
-            x = x.dropout(0.5)
+            x = x.dropout(0.25)
 
         return x.matmul(self.w4) + self.b4
 

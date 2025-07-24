@@ -37,38 +37,40 @@ void tensor_relu_backward(const float* grad_output, const float* input, float* g
         fprintf(stderr, "Error: NULL pointer passed to tensor_relu_backward\n");
         return;
     }
-    
+
     size_t i = 0;
-    __m256 zero = _mm256_setzero_ps();
-    
-    // Process 32 elements at a time (4 * 8 = 32 floats)
-    for (; i + 4*VEC_SIZE <= n; i += 4*VEC_SIZE) {
-        _mm_prefetch(input + i + 4*VEC_SIZE, _MM_HINT_T0);
-        _mm_prefetch(grad_output + i + 4*VEC_SIZE, _MM_HINT_T0);
-        
+    const __m256 zero = _mm256_setzero_ps();
+
+    // Process 32 elements at a time
+    for (; i + 4 * VEC_SIZE <= n; i += 4 * VEC_SIZE) {
+        _mm_prefetch(input + i + 4 * VEC_SIZE, _MM_HINT_T0);
+        _mm_prefetch(grad_output + i + 4 * VEC_SIZE, _MM_HINT_T0);
+
         for (size_t j = 0; j < 4; j++) {
-            size_t idx = i + j*VEC_SIZE;
+            size_t idx = i + j * VEC_SIZE;
             __m256 vinput = _mm256_loadu_ps(input + idx);
             __m256 vgrad = _mm256_loadu_ps(grad_output + idx);
-            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GE_OQ);
-            __m256 vresult = _mm256_and_ps(vgrad, vmask);
+            __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);  // x > 0
+            __m256 vfiltered = _mm256_blendv_ps(zero, vgrad, vmask);
             __m256 vprev = _mm256_loadu_ps(grad_input + idx);
-            __m256 vsum = _mm256_add_ps(vprev, vresult);
+            __m256 vsum = _mm256_add_ps(vprev, vfiltered);
             _mm256_storeu_ps(grad_input + idx, vsum);
         }
     }
 
+    // Remaining full vector chunks
     for (; i + VEC_SIZE <= n; i += VEC_SIZE) {
         __m256 vinput = _mm256_loadu_ps(input + i);
         __m256 vgrad = _mm256_loadu_ps(grad_output + i);
-        __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GE_OQ);
-        __m256 vresult = _mm256_and_ps(vgrad, vmask);
+        __m256 vmask = _mm256_cmp_ps(vinput, zero, _CMP_GT_OQ);  // x > 0
+        __m256 vfiltered = _mm256_blendv_ps(zero, vgrad, vmask);
         __m256 vprev = _mm256_loadu_ps(grad_input + i);
-        __m256 vsum = _mm256_add_ps(vprev, vresult);
+        __m256 vsum = _mm256_add_ps(vprev, vfiltered);
         _mm256_storeu_ps(grad_input + i, vsum);
     }
-    
+
+    // Scalar tail
     for (; i < n; i++) {
-        grad_input[i] += input[i] >= 0.0f ? grad_output[i] : 0.0f;
+        grad_input[i] += input[i] > 0.0f ? grad_output[i] : 0.0f;
     }
 }

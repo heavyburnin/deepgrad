@@ -6,19 +6,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef enum {
-    MATMUL_FORWARD,
-    MATMUL_BACKWARD
-} PassMode;
-
-// Unified entry point for both forward and backward
-void tensor_matmul(
-    PassMode mode,
-    const float* A, const float* B, const float* grad_out,
-    float* C_or_gradA, float* grad_B,
-    size_t batch, size_t M, size_t K, size_t N,
-    bool accumulate
-);
 
 // Forward pass: C = A @ B
 void matmul_forward(

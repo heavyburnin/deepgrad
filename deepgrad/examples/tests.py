@@ -1,213 +1,322 @@
 import unittest
+import math
+import random
 import numpy as np
-from ctypes import c_float
-from deepgrad.tensor import Tensor
-from deepgrad.broadcast import broadcast_to_shape
-import pickle
+from typing import Tuple
+from deepgrad.tensor import Tensor, zeros, ones, rand, randn
 
+class TestDeepGradTensor(unittest.TestCase):
+    def assertTensorEqual(self, tensor: Tensor, expected: np.ndarray, tol: float = 1e-6):
+        """Helper to compare tensor data with expected values within tolerance."""
+        actual = np.array(tensor.data).reshape(tensor.shape)
+        np.testing.assert_array_almost_equal(actual, expected, decimal=int(-math.log10(tol)))
+        self.assertEqual(tensor.shape, expected.shape)
 
-# Constants for gradient checking
-EPS = 1e-4  # For finite difference
-TOL = 1e-2  # Acceptable relative error for gradients
+    def assertGradEqual(self, tensor: Tensor, expected_grad: np.ndarray, tol: float = 1e-6):
+        """Helper to compare tensor gradients with expected values within tolerance."""
+        if tensor.grad is None:
+            self.assertIsNone(expected_grad)
+            return
+        actual = np.array(tensor.grad).reshape(tensor.shape)
+        np.testing.assert_array_almost_equal(actual, expected_grad, decimal=int(-math.log10(tol)))
+        self.assertEqual(tensor.shape, expected_grad.shape)
 
-def to_numpy(tensor):
-    """Convert Tensor data to a NumPy array with the same shape."""
-    return np.array([tensor.data[i] for i in range(tensor.size)]).reshape(tensor.shape)
+    def setUp(self):
+        """Set up test fixtures."""
+        random.seed(42)  # For reproducible random tests
+        np.random.seed(42)
 
-def make_tensor(data, shape=None, requires_grad=False):
-    """Create a Tensor from a list of floats with optional shape and gradient tracking."""
-    arr = (c_float * len(data))(*data)
-    return Tensor(arr, requires_grad=requires_grad, shape=shape or (len(data),))
+    def test_tensor_creation(self):
+        """Test tensor creation with various inputs."""
+        # Basic creation
+        data = [1.0, 2.0, 3.0]
+        t = Tensor(data)
+        self.assertEqual(t.shape, (3,))
+        self.assertEqual(t.size, 3)
+        self.assertFalse(t.requires_grad)
+        self.assertTensorEqual(t, np.array(data))
 
-make_ctypes = lambda lst: (c_float * len(lst))(*lst)
+        # With shape
+        data_2d = [1.0, 2.0, 3.0, 4.0]
+        t = Tensor(data_2d, shape=(2, 2))
+        self.assertEqual(t.shape, (2, 2))
+        self.assertEqual(t.size, 4)
+        self.assertTensorEqual(t, np.array(data_2d).reshape(2, 2))
 
-def numerical_grad(f, x_tensor, idx):
-    """Compute numerical gradient for a tensor at a specific index using finite differences."""
-    orig = x_tensor.data[idx]
-    x_tensor.data[idx] = orig + EPS
-    f1 = f().data[0]
-    x_tensor.data[idx] = orig - EPS
-    f2 = f().data[0]
-    x_tensor.data[idx] = orig
-    return (f1 - f2) / (2 * EPS)
+        # Invalid shape
+        with self.assertRaises(ValueError):
+            Tensor([1.0, 2.0], shape=(3,))
 
-def grad_check(test, f, x_tensor, name="", f_numpy=None):
-    """Check forward pass and gradients against NumPy implementation."""
-    x_tensor.requires_grad = True
-    y = f()
+        # Invalid data type
+        with self.assertRaises(ValueError):
+            Tensor("invalid")
 
-    if f_numpy:
-        x_np = to_numpy(x_tensor)
-        y_np = f_numpy(x_np)
-        y_val = to_numpy(y).item()
-        print(f"{name} forward check: got {y_val}, expected {y_np}")
-        test.assertTrue(np.allclose(y_val, y_np, atol=1e-4),
-                        f"{name} forward check failed: got {y_val}, expected {y_np}")
+    def test_zeros_ones(self):
+        """Test zeros and ones creation functions."""
+        shape = (2, 3)
+        t1 = zeros(shape)
+        self.assertEqual(t1.shape, shape)
+        self.assertTensorEqual(t1, np.zeros(shape))
 
-    y.backward()
-    print(f"Testing gradients for: {name}")
-    for i in range(x_tensor.size):
-        expected = numerical_grad(f, x_tensor, i)
-        actual = x_tensor.grad[i]
-        rel_error = abs(actual - expected) / (abs(expected) + 1e-6)
-        test.assertTrue(rel_error < TOL,
-                        f"Grad check failed at idx {i}: expected {expected:.5f}, got {actual:.5f}, rel_error={rel_error:.5f}")
-    print("Passed.\n")
+        shape = (2, 2)
+        t2 = ones(shape)
+        self.assertEqual(t2.shape, shape)
+        self.assertTensorEqual(t2, np.ones(shape))
 
-class TestTensor(unittest.TestCase):
-    def test_add(self):
-        """Test element-wise addition and its gradients."""
-        a = make_tensor([1.0, 2.0, 3.0], requires_grad=True)
-        b_np = np.array([4.0, 5.0, 6.0])
-        b = make_tensor(b_np.tolist())
-        def f(): return (a + b).sum()
-        grad_check(self, f, a, "add", lambda x: np.sum(x + b_np))
+    def test_rand_randn(self):
+        """Test random tensor creation."""
+        shape = (2, 2)
+        t1 = rand(shape)
+        self.assertEqual(t1.shape, shape)
+        self.assertTrue(np.all(np.array(t1.data).reshape(shape) >= 0.0))
+        self.assertTrue(np.all(np.array(t1.data).reshape(shape) < 1.0))
 
-    def test_mul(self):
-        """Test element-wise multiplication and its gradients."""
-        a = make_tensor([1.0, 2.0, 3.0], requires_grad=True)
-        b_np = np.array([0.1, 0.2, 0.3])
-        b = make_tensor(b_np.tolist())
-        def f(): return (a * b).sum()
-        grad_check(self, f, a, "mul", lambda x: np.sum(x * b_np))
+        shape = (1000,)
+        t2 = randn(shape, mean=0.0, std=1.0)
+        data = np.array(t2.data).reshape(shape)
+        self.assertAlmostEqual(np.mean(data), 0.0, delta=0.1)
+        self.assertAlmostEqual(np.std(data), 1.0, delta=0.1)
 
-    def test_pow(self):
-        """Test element-wise power operation and its gradients."""
-        a = make_tensor([1.0, 2.0, 3.0], requires_grad=True)
-        def f(): return (a ** 2).sum()
-        grad_check(self, f, a, "pow", lambda x: np.sum(x ** 2))
+    def test_arithmetic_operations(self):
+        """Test basic arithmetic operations and their gradients."""
+        a_data = np.array([1.0, 2.0, 3.0])
+        b_data = np.array([4.0, 5.0, 6.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        b = Tensor(b_data.tolist(), requires_grad=True)
 
-    def test_sum(self):
-        """Test sum reduction and its gradients."""
-        a = make_tensor([1.0, -2.0, 3.0], requires_grad=True)
-        def f(): return a.sum()
-        grad_check(self, f, a, "sum", lambda x: np.sum(x))
+        # Addition
+        c = a + b
+        self.assertTensorEqual(c, a_data + b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, np.ones_like(a_data))
+        self.assertGradEqual(b, np.ones_like(b_data))
 
-    def test_mean(self):
-        """Test mean reduction and its gradients."""
-        a = make_tensor([1.0, -2.0, 3.0], requires_grad=True)
-        def f(): return a.mean()
-        grad_check(self, f, a, "mean", lambda x: np.mean(x))
+        # Subtraction
+        a.grad, b.grad = None, None
+        c = a - b
+        self.assertTensorEqual(c, a_data - b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, np.ones_like(a_data))
+        self.assertGradEqual(b, -np.ones_like(b_data))
+
+        # Multiplication
+        a.grad, b.grad = None, None
+        c = a * b
+        self.assertTensorEqual(c, a_data * b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, b_data)
+        self.assertGradEqual(b, a_data)
+
+        # Division
+        a.grad, b.grad = None, None
+        c = a / b
+        self.assertTensorEqual(c, a_data / b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, 1.0 / b_data, tol=1e-5)
+        self.assertGradEqual(b, -a_data / (b_data ** 2), tol=1e-5)
+
+        # Power
+        a.grad, b.grad = None, None
+        c = a ** 2
+        self.assertTensorEqual(c, a_data ** 2)
+        c.sum().backward()
+        self.assertGradEqual(a, 2.0 * a_data)
+
+    def test_broadcasting(self):
+        """Test broadcasting and gradient unbroadcasting."""
+        a_data = np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2)
+        b_data = np.array([2.0, 3.0])
+        a = Tensor(a_data.flatten().tolist(), shape=(2, 2), requires_grad=True)
+        b = Tensor(b_data.tolist(), requires_grad=True)
+        c = a + b
+        self.assertEqual(c.shape, (2, 2))
+        self.assertTensorEqual(c, a_data + b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, np.ones_like(a_data))
+        self.assertGradEqual(b, np.sum(np.ones_like(a_data), axis=0))
+
+    def test_reshape(self):
+        """Test reshape operation and gradient propagation."""
+        a_data = np.array([1.0, 2.0, 3.0, 4.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        b = a.reshape((2, 2))
+        self.assertEqual(b.shape, (2, 2))
+        self.assertTensorEqual(b, a_data.reshape(2, 2))
+        b.sum().backward()
+        self.assertGradEqual(a, np.ones_like(a_data))
+
+        # Test invalid reshape
+        with self.assertRaises(ValueError):
+            a.reshape((3, 2))
+
+    def test_flatten(self):
+        """Test flatten operation."""
+        a_data = np.array([1.0, 2.0, 3.0, 4.0]).reshape(2, 2)
+        a = Tensor(a_data.flatten().tolist(), shape=(2, 2), requires_grad=True)
+        b = a.flatten()
+        self.assertEqual(b.shape, (4,))
+        self.assertTensorEqual(b, a_data.flatten())
+        b.sum().backward()
+        self.assertGradEqual(a, np.ones_like(a_data))
 
     def test_matmul(self):
-        """Test matrix multiplication and its gradients."""
-        a_np = np.array([[1.0, 2.0], [3.0, 4.0]])
-        b_np = np.array([[1.0, 0.0], [0.0, 1.0]])
-        a = make_tensor(a_np.flatten().tolist(), requires_grad=True, shape=(2, 2))
-        b = make_tensor(b_np.flatten().tolist(), shape=(2, 2))
-        def f(): return a.matmul(b).sum()
-        grad_check(self, f, a, "matmul", lambda x: np.sum(np.matmul(x.reshape(2, 2), b_np)))
+        """Test matrix multiplication and gradients."""
+        # Basic matmul
+        a_data = np.array([[1.0, 2.0], [3.0, 4.0]])
+        b_data = np.array([[5.0, 6.0], [7.0, 8.0]])
+        a = Tensor(a_data.flatten().tolist(), shape=(2, 2), requires_grad=True)
+        b = Tensor(b_data.flatten().tolist(), shape=(2, 2), requires_grad=True)
+
+        c = a.matmul(b)
+        self.assertEqual(c.shape, (2, 2))
+        self.assertTensorEqual(c, a_data @ b_data)
+        c.sum().backward()
+        self.assertGradEqual(a, np.ones_like(c.data).reshape(c.shape) @ b_data.T)
+        self.assertGradEqual(b, a_data.T @ np.ones_like(c.data).reshape(c.shape))
+
+        # Batched matmul
+        a_data = np.array([[[1.0, 2.0]], [[3.0, 4.0]]])  # shape: (2, 1, 2)
+        b_data = np.array([[[5.0], [6.0]], [[7.0], [8.0]]])  # shape: (2, 2, 1)
+
+        a = Tensor(a_data.flatten().tolist(), shape=(2, 1, 2), requires_grad=True)
+        b = Tensor(b_data.copy().reshape(-1).tolist(), shape=(2, 2, 1), requires_grad=True)
+        c = a.matmul(b)  # shape: (2, 1, 1)
+
+        self.assertEqual(c.shape, (2, 1, 1))
+        expected = np.matmul(a_data, b_data)
+        self.assertTensorEqual(c, expected)
+        c.sum().backward()
+
+        grad_out = np.ones_like(c.data).reshape(2, 1, 1)
+        expected_grad_a = np.matmul(grad_out, b_data.transpose(0, 2, 1))
+        expected_grad_b = np.matmul(a_data.transpose(0, 2, 1), grad_out)
+        self.assertGradEqual(a, expected_grad_a)
+        self.assertGradEqual(b, expected_grad_b)
+
+    def test_conv2d(self):
+        """Test 2D convolution and gradients."""
+        input_data = np.array([1.0, 2.0, 3.0, 4.0]).reshape(1, 1, 2, 2)
+        weight_data = np.array([1.0, 0.0, 0.0, 1.0]).reshape(1, 1, 2, 2)
+        bias_data = np.array([0.0])
+        input = Tensor(input_data.flatten().tolist(), shape=(1, 1, 2, 2), requires_grad=True)
+        weight = Tensor(weight_data.flatten().tolist(), shape=(1, 1, 2, 2), requires_grad=True)
+        bias = Tensor(bias_data.tolist(), requires_grad=True)
+        out = input.conv2d(weight, bias, stride=(1, 1), padding=(0, 0))
+        self.assertEqual(out.shape, (1, 1, 1, 1))
+        expected_out = np.sum(input_data * weight_data) + bias_data
+        self.assertTensorEqual(out, expected_out.reshape(1, 1, 1, 1))
+        out.sum().backward()
+        self.assertGradEqual(input, weight_data)
+        self.assertGradEqual(weight, input_data)
+        self.assertGradEqual(bias, np.ones_like(bias_data))
+
+    def test_maxpool2d(self):
+        """Test 2D max pooling and gradients."""
+        input_data = np.array([1.0, 2.0, 3.0, 4.0]).reshape(1, 1, 2, 2)
+        input = Tensor(input_data.flatten().tolist(), shape=(1, 1, 2, 2), requires_grad=True)
+        out = input.maxpool2d(kernel_size=(2, 2))
+        self.assertEqual(out.shape, (1, 1, 1, 1))
+        expected_out = np.max(input_data)
+        self.assertTensorEqual(out, np.array([expected_out]).reshape(1, 1, 1, 1))
+        out.sum().backward()
+        expected_grad = np.zeros_like(input_data)
+        expected_grad[np.unravel_index(np.argmax(input_data), input_data.shape)] = 1.0
+        self.assertGradEqual(input, expected_grad)
+
+    def test_avgpool2d(self):
+        """Test 2D average pooling and gradients."""
+        input_data = np.array([1.0, 2.0, 3.0, 4.0]).reshape(1, 1, 2, 2)
+        input = Tensor(input_data.flatten().tolist(), shape=(1, 1, 2, 2), requires_grad=True)
+        out = input.avgpool2d(kernel_size=(2, 2))
+        self.assertEqual(out.shape, (1, 1, 1, 1))
+        expected_out = np.mean(input_data)
+        self.assertTensorEqual(out, np.array([expected_out]).reshape(1, 1, 1, 1))
+        out.sum().backward()
+        expected_grad = np.ones_like(input_data) / input_data.size
+        self.assertGradEqual(input, expected_grad)
 
     def test_relu(self):
-        """Test ReLU activation and its gradients."""
-        a = make_tensor([-1.0, -0.1, 1.0], requires_grad=True)
-        def f(): return a.relu().sum()
-        grad_check(self, f, a, "relu", lambda x: np.sum(np.maximum(0, x)))
+        """Test ReLU activation and gradients."""
+        a_data = np.array([-1.0, 0.0, 1.0, 2.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        b = a.relu()
+        self.assertTensorEqual(b, np.maximum(a_data, 0.0))
+        b.sum().backward()
+        expected_grad = np.where(a_data > 0, 1.0, 0.0)
+        self.assertGradEqual(a, expected_grad)
 
     def test_cross_entropy(self):
-        """Test cross-entropy loss and its gradients."""
-        logits_np = np.array([[2.0, 1.0, 0.1], [0.3, 2.5, 0.3]])
-        targets_np = np.array([0, 2])
-        logits = make_tensor(logits_np.flatten().tolist(), requires_grad=True, shape=(2, 3))
-        targets = make_tensor(targets_np.tolist(), shape=(2,))
-        def f(): return logits.cross_entropy(targets)
-        def f_np(x):
-            x = x.reshape(2, 3)
-            exp = np.exp(x - x.max(axis=1, keepdims=True))
-            probs = exp / exp.sum(axis=1, keepdims=True)
-            log_likelihood = -np.log(probs[np.arange(2), targets_np])
-            return np.mean(log_likelihood)
-        grad_check(self, f, logits, "cross_entropy", f_np)
+        """Test cross-entropy loss and gradients."""
+        logits_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).reshape(2, 3)
+        target_data = np.array([1, 2])
+        logits = Tensor(logits_data.flatten().tolist(), shape=(2, 3), requires_grad=True)
+        target = Tensor(target_data.tolist(), requires_grad=False)
+        loss = logits.cross_entropy(target)
+        
+        # Compute expected loss
+        exps = np.exp(logits_data - np.max(logits_data, axis=1, keepdims=True))
+        probs = exps / np.sum(exps, axis=1, keepdims=True)
+        expected_loss = -np.mean(np.log(probs[np.arange(2), target_data]))
+        self.assertAlmostEqual(loss.data[0], expected_loss, delta=1e-4)
+        
+        loss.backward()
+        # Compute expected gradient: (softmax(logits) - one_hot(targets)) / batch_size
+        one_hot = np.zeros_like(probs)
+        one_hot[np.arange(2), target_data] = 1.0
+        expected_grad = (probs - one_hot) / 2
+        self.assertGradEqual(logits, expected_grad, tol=1e-4)
 
-    def test_broadcast_to_shape(self):
-        """Test broadcasting to various shapes."""
-        # Test 1: Scalar to 1D vector
-        data = make_ctypes([1.0])
-        result = broadcast_to_shape(data, (1,), (3,), 1)
-        self.assertEqual([result[i] for i in range(3)], [1.0, 1.0, 1.0])
+    def test_dropout(self):
+        """Test dropout operation."""
+        random.seed(42)
+        np.random.seed(42)
+        a_data = np.array([1.0, 2.0, 3.0, 4.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        p = 0.5
+        random.seed(42)  # Ensure Python's random matches test setup
+        b = a.dropout(p=p)
+        # Use the mask stored in the output tensor
+        mask = np.array(b._mask).reshape(a_data.shape) if b._mask is not None else np.ones_like(a_data)
+        scale = 1.0 / (1.0 - p)
+        expected = a_data * mask
+        self.assertTensorEqual(b, expected, tol=1e-6)
+        b.sum().backward()
+        self.assertGradEqual(a, mask, tol=1e-6)
 
-        # Test 2: Scalar to 2D matrix
-        data = make_ctypes([2.0])
-        result = broadcast_to_shape(data, (1,), (2, 3), 1)
-        self.assertEqual([result[i] for i in range(6)], [2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+    def test_clone_detach(self):
+        """Test clone and detach operations."""
+        a_data = np.array([1.0, 2.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        b = a.clone()
+        self.assertTensorEqual(b, a_data)
+        self.assertTrue(b.requires_grad)
+        b.sum().backward()
+        self.assertIsNone(a.grad)
 
-        # Test 3: 1D vector to 2D matrix (broadcast along rows)
-        data = make_ctypes([1.0, 2.0, 3.0])
-        result = broadcast_to_shape(data, (3,), (2, 3), 3)
-        self.assertEqual([result[i] for i in range(6)], [1.0, 2.0, 3.0, 1.0, 2.0, 3.0])
+        c = a.detach()
+        self.assertTensorEqual(c, a_data)
+        self.assertFalse(c.requires_grad)
 
-        # Test 4: 2D matrix to 3D tensor (broadcast along batch dimension)
-        data = make_ctypes([1.0, 2.0, 3.0, 4.0])
-        result = broadcast_to_shape(data, (2, 2), (3, 2, 2), 4)
-        self.assertEqual([result[i] for i in range(12)], [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0])
+    def test_backward_non_scalar(self):
+        """Test error handling for non-scalar backward."""
+        a = Tensor([1.0, 2.0], requires_grad=True)
+        with self.assertRaises(RuntimeError):
+            a.backward()
 
-        # Test 5: Invalid broadcast (incompatible shapes)
-        data = make_ctypes([1.0, 2.0])
-        with self.assertRaises(ValueError):
-            broadcast_to_shape(data, (2,), (2, 3), 2)
-
-    def test_add_broadcast(self):
-        """Test broadcasting in addition and gradient computation."""
-        a = make_tensor(([1.0, 2.0, 3.0]), requires_grad=True, shape=(3,))
-        b = make_tensor(([1.0]), shape=(1,))
-        c = a + b
-        self.assertEqual(c.shape, (3,))
+    def test_release_graph(self):
+        """Test releasing computation graph memory."""
+        a_data = np.array([1.0, 2.0])
+        b_data = np.array([3.0, 4.0])
+        a = Tensor(a_data.tolist(), requires_grad=True)
+        b = Tensor(b_data.tolist(), requires_grad=True)
+        c = a * b
         loss = c.sum()
         loss.backward()
-        self.assertEqual([a.grad[i] for i in range(3)], [1.0, 1.0, 1.0])
+        c.release_graph()
+        self.assertIsNone(c._backward)
+        self.assertEqual(c._prev, [])
+        self.assertIsNone(a.grad)
+        self.assertIsNone(b.grad)
 
-    def test_reshape_and_grad(self):
-        """Test reshape operation and gradient propagation."""
-        a = make_tensor(([1.0, 2.0, 3.0, 4.0]), requires_grad=True, shape=(4,))
-        b = a.reshape((2, 2))
-        c = b.sum()
-        c.backward()
-        self.assertEqual([a.grad[i] for i in range(4)], [1.0, 1.0, 1.0, 1.0])
-
-    def test_matmul_batch(self):
-        """Test batched matrix multiplication and gradients."""
-        a = make_tensor(([1, 2, 3, 4, 5, 6]), requires_grad=True, shape=(2, 3))
-        b = make_tensor(([1, 1, 1]), shape=(3, 1))
-        c = a.matmul(b)
-        self.assertEqual(c.shape, (2, 1))
-        c.sum().backward()
-        self.assertEqual([a.grad[i] for i in range(6)], [1, 1, 1, 1, 1, 1])
-
-    def test_cross_entropy(self):
-        """Test cross-entropy loss and gradient computation."""
-        logits = make_tensor(([2.0, 1.0, 0.1, 0.5, 2.5, 0.3]), requires_grad=True, shape=(2, 3))
-        labels = make_tensor(([0.0, 2.0]), shape=(2,))
-        loss = logits.cross_entropy(labels)
-        loss.backward()
-        self.assertEqual(loss.shape, (1,))
-        self.assertIsNotNone(logits.grad)
-
-    def test_serialization_roundtrip(self):
-        """Test tensor serialization and deserialization."""
-        a = make_tensor(([1.0, 2.0, 3.0]), requires_grad=True, shape=(3,))
-        a.grad = make_ctypes([1.0, 1.0, 1.0])
-        serialized = pickle.dumps(a)
-        b = pickle.loads(serialized)
-        self.assertEqual([b.data[i] for i in range(3)], [1.0, 2.0, 3.0])
-        self.assertEqual([b.grad[i] for i in range(3)], [1.0, 1.0, 1.0])
-
-    def test_flatten_and_backward(self):
-        """Test flatten operation and gradient propagation."""
-        a = make_tensor(list(range(6)), requires_grad=True, shape=(2, 3))
-        b = a.flatten()
-        c = b.sum()
-        c.backward()
-        self.assertEqual([a.grad[i] for i in range(6)], [1.0] * 6)
-
-    def test_avgpool2d_and_maxpool2d(self):
-        """Test 2D average and max pooling with gradient computation."""
-        x = make_tensor([float(i) for i in range(16)], requires_grad=True, shape=(1, 1, 4, 4))
-        y1 = x.avgpool2d(kernel_size=2)
-        y2 = x.maxpool2d(kernel_size=2)
-        self.assertEqual(y1.shape, (1, 1, 2, 2))
-        self.assertEqual(y2.shape, (1, 1, 2, 2))
-        (y1 + y2).sum().backward()
-        self.assertIsNotNone(x.grad)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

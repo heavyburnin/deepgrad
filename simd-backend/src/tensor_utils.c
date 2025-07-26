@@ -6,6 +6,7 @@
 #include <stdlib.h>      // For NULL
 #include <mm_malloc.h>   // For _mm_malloc, _mm_free
 #include <math.h>
+#include <time.h>
 
 // Utility to allocate or reuse aligned memory
 float* get_cached_buffer(float** buf, size_t* current_size, size_t required_size) {
@@ -189,5 +190,130 @@ void sanitize_gradients(float* data, size_t size) {
         if (!isfinite(data[i])) {
             data[i] = 0.0f;
         }
+    }
+}
+
+void tensor_dropout(const float* input, float* output, float* mask, size_t size, float p, float scale) {
+    if (!input || !output || !mask) {
+        return; // Prevent segfault on null pointers
+    }
+
+    #ifdef __AVX2__
+    __m256 scale_vec = _mm256_set1_ps(scale);
+    __m256 zero_vec = _mm256_set1_ps(0.0f);
+    __m256 p_vec = _mm256_set1_ps(p);
+    
+    // Only use AVX2 for sizes >= 8 to avoid over-access
+    size_t avx_bound = (size >= 8) ? (size - (size % 8)) : 0;
+    for (size_t i = 0; i < avx_bound; i += 8) {
+        // Generate random values [0,1)
+        __m256 rand_vec = _mm256_set_ps(
+            (float)rand() / RAND_MAX, (float)rand() / RAND_MAX,
+            (float)rand() / RAND_MAX, (float)rand() / RAND_MAX,
+            (float)rand() / RAND_MAX, (float)rand() / RAND_MAX,
+            (float)rand() / RAND_MAX, (float)rand() / RAND_MAX
+        );
+        
+        // Create mask: scale if rand > p, else 0
+        __m256 mask_vec = _mm256_blendv_ps(zero_vec, scale_vec, _mm256_cmp_ps(rand_vec, p_vec, _CMP_GT_OQ));
+        
+        // Store mask
+        _mm256_storeu_ps(mask + i, mask_vec);
+        
+        // Apply mask to input
+        __m256 input_vec = _mm256_loadu_ps(input + i);
+        __m256 out_vec = _mm256_mul_ps(input_vec, mask_vec);
+        _mm256_storeu_ps(output + i, out_vec);
+    }
+    
+    // Handle remaining elements
+    for (size_t i = avx_bound; i < size; i++) {
+        float r = (float)rand() / RAND_MAX;
+        mask[i] = (r > p) ? scale : 0.0f;
+        output[i] = input[i] * mask[i];
+    }
+    
+    #else
+    for (size_t i = 0; i < size; i++) {
+        float r = (float)rand() / RAND_MAX;
+        mask[i] = (r > p) ? scale : 0.0f;
+        output[i] = input[i] * mask[i];
+    }
+    #endif
+}
+
+void tensor_fill_zeros(float* output, size_t size) {
+    #ifdef __AVX2__
+    __m256 zero_vec = _mm256_set1_ps(0.0f);
+    for (size_t i = 0; i < size; i += 8) {
+        _mm256_storeu_ps(output + i, zero_vec);
+    }
+    for (size_t i = size - (size % 8); i < size; i++) {
+        output[i] = 0.0f;
+    }
+    #else
+    for (size_t i = 0; i < size; i++) {
+        output[i] = 0.0f;
+    }
+    #endif
+}
+
+void tensor_fill_ones(float* output, size_t size) {
+    #ifdef __AVX2__
+    __m256 one_vec = _mm256_set1_ps(1.0f);
+    for (size_t i = 0; i < size; i += 8) {
+        _mm256_storeu_ps(output + i, one_vec);
+    }
+    for (size_t i = size - (size % 8); i < size; i++) {
+        output[i] = 1.0f;
+    }
+    #else
+    for (size_t i = 0; i < size; i++) {
+        output[i] = 1.0f;
+    }
+    #endif
+}
+
+void tensor_fill_rand(float* output, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        output[i] = (float)rand() / RAND_MAX;
+    }
+}
+
+void tensor_fill_randn(float* output, size_t size, float mean, float std) {
+    for (size_t i = 0; i < size; i += 2) {
+        float u1 = (float)rand() / RAND_MAX;
+        float u2 = (float)rand() / RAND_MAX;
+        // Box-Muller transform
+        float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * M_PI * u2);
+        float z1 = sqrtf(-2.0f * logf(u1)) * sinf(2.0f * M_PI * u2);
+        output[i] = mean + std * z0;
+        if (i + 1 < size) {
+            output[i + 1] = mean + std * z1;
+        }
+    }
+}
+
+void accumulate_grad(float* restrict grad, const float* restrict dgrad, size_t size) {
+    size_t i = 0;
+
+    #pragma omp parallel for
+    for (i = 0; i < size; i += 8) {
+        __m256 g = _mm256_loadu_ps(&grad[i]);
+        __m256 dg = _mm256_loadu_ps(&dgrad[i]);
+        __m256 sum = _mm256_add_ps(g, dg);
+        _mm256_storeu_ps(&grad[i], sum);
+    }
+}
+
+void accumulate_grad_avx(float* restrict grad, const float* restrict dgrad, size_t size) {
+    size_t i = 0;
+
+    #pragma omp parallel for
+    for (i = 0; i < size; i += 8) {
+        __m256 g = _mm256_loadu_ps(&grad[i]);
+        __m256 dg = _mm256_loadu_ps(&dgrad[i]);
+        __m256 sum = _mm256_add_ps(g, dg);
+        _mm256_storeu_ps(&grad[i], sum);
     }
 }

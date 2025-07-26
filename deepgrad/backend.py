@@ -180,7 +180,16 @@ function_signatures = {
          c_size_t,   # H
          c_size_t,   # W
          c_float     # eps
-      ], None)
+      ], None),
+   
+   'tensor_dropout': ([c_float_p, c_float_p, c_float_p, c_size_t, c_float, c_float], None),
+   'tensor_fill_zeros': ([c_float_p, c_size_t], None),
+   'tensor_fill_ones': ([c_float_p, c_size_t], None),
+   'tensor_fill_rand': ([c_float_p, c_size_t], None),
+   'tensor_fill_randn': ([c_float_p, c_size_t, c_float, c_float], None),
+
+   'accumulate_grad': ([c_float_p, c_float_p, c_size_t], None),
+   'accumulate_grad_avx': ([c_float_p, c_float_p, c_size_t], None)
 
 }
 

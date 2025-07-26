@@ -375,12 +375,10 @@ void tensor_pow_grad(const float* dout, const float* base, const float* exponent
         __m256 vlogb = log256_ps(vb_clamped);
         __m256 pow_val = exp256_ps(_mm256_mul_ps(ve, vlogb));
 
-        // dbase = dout * e * base^(e-1) = dout * e * pow(base, e-1)
         __m256 e_minus_1 = _mm256_sub_ps(ve, _mm256_set1_ps(1.0f));
         __m256 base_pow_e_minus_1 = exp256_ps(_mm256_mul_ps(e_minus_1, vlogb));
         __m256 dbase_vec = _mm256_mul_ps(vdout, _mm256_mul_ps(ve, base_pow_e_minus_1));
 
-        // dexp = dout * pow(base, e) * log(base)
         __m256 dexp_vec = _mm256_mul_ps(vdout, _mm256_mul_ps(pow_val, vlogb));
 
         _mm256_storeu_ps(dbase + i, _mm256_add_ps(_mm256_loadu_ps(dbase + i), dbase_vec));

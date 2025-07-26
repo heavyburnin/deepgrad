@@ -304,8 +304,9 @@ class Tensor:
                     return
                 if self.grad is None:
                     self.grad = (c_float * self.size)()
-                for i in range(self.size):
-                    self.grad[i] += out.grad[i]
+                # for i in range(self.size):
+                    # self.grad[i] += out.grad[i]
+                SimdTensorBackend.tensor_add_inplace(self.grad, out.grad, self.size)
             out._backward = _backward
 
         return out
@@ -344,8 +345,9 @@ class Tensor:
                     return
                 if self.grad is None:
                     self.grad = (c_float * self.size)()
-                for i in range(self.size):
-                    self.grad[i] += out.grad[i]
+                # for i in range(self.size):
+                    # self.grad[i] += out.grad[i]
+                SimdTensorBackend.tensor_add_inplace(self.grad, out.grad, self.size)
             out._backward = _backward
             out._prev = [self]
 
@@ -553,8 +555,7 @@ class Tensor:
                     if self.grad is None:
                         self.grad = tmp
                     else:
-                        for i in range(self.size):
-                            self.grad[i] += tmp[i]
+                        SimdTensorBackend.tensor_add_inplace(self.grad, tmp, self.size)
             out._backward = _backward
             out._prev = [self]
 
@@ -565,17 +566,18 @@ class Tensor:
         result = SimdTensorBackend.tensor_sum(self.data, None, self.size)
         out_data[0] = result
         out = Tensor(out_data, requires_grad=self.requires_grad, shape=(1,), size=1)
-
         if out.requires_grad:
             def _backward():
                 if self.requires_grad and out.grad is not None:
                     scalar_grad = out.grad[0]
-                    # Each element contributes equally to the sum, so its gradient is 1 * scalar_grad
                     if self._grad is None:
+                        # Allocate and fill self._grad with scalar_grad
                         self._grad = (c_float * self.size)(*[scalar_grad] * self.size)
                     else:
-                        for i in range(self.size):
-                            self._grad[i] += scalar_grad
+                        # Create a temp gradient buffer filled with scalar_grad
+                        temp_grad = (c_float * self.size)(*[scalar_grad] * self.size)
+                        # Accumulate into self._grad using optimized inplace add
+                        SimdTensorBackend.tensor_add_inplace(self._grad, temp_grad, self.size)
             out._backward = _backward
             out._prev = [self]
 
@@ -598,10 +600,13 @@ class Tensor:
                 if self.requires_grad and out.grad is not None:
                     scalar_grad = out.grad[0] / self.size
                     if self._grad is None:
+                        # First time: allocate and fill with scalar_grad
                         self._grad = (c_float * self.size)(*[scalar_grad] * self.size)
                     else:
-                        for i in range(self.size):
-                            self._grad[i] += scalar_grad
+                        # Create a temp gradient buffer filled with scalar_grad
+                        temp_grad = (c_float * self.size)(*[scalar_grad] * self.size)
+                        # Accumulate into self._grad
+                        SimdTensorBackend.tensor_add_inplace(self._grad, temp_grad, self.size)
             out._backward = _backward
             out._prev = [self]
 
@@ -876,31 +881,28 @@ class Tensor:
         scale = 1.0 / (1.0 - p)
         size = self.size
         shape = self.shape
-        MaskArrayType = c_float * size
-        mask_array = MaskArrayType()
+        out_data = (c_float * size)()
+        mask_array = (c_float * size)()
 
-        for i in range(size):
-            mask_array[i] = scale if random.random() > p else 0.0
+        SimdTensorBackend.tensor_dropout(self.data, out_data, mask_array, size, p, scale)
 
-        mask_tensor = Tensor(mask_array, requires_grad=False, shape=shape, size=size)
-        out = self * mask_tensor
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=shape, size=size)
 
         if out.requires_grad:
             out._mask = mask_array
             def _backward():
                 if out.grad is None:
                     return
-                if self.grad is None:
-                    self.grad = (c_float * self.size)()
-                SimdTensorBackend.tensor_mul(out.grad, out._mask, self.grad, self.size, 0)
+                if self._grad is None:
+                    self._grad = (c_float * self.size)()
+                SimdTensorBackend.tensor_mul(out.grad, out._mask, self._grad, self.size, 0)
                 out._mask = None
             
             out._backward = _backward
             out._prev = [self]
             
-
         return out
-
+    
     def backward(self) -> None:
         """
         Computes gradients via reverse-mode autodiff.
@@ -958,7 +960,8 @@ def zeros(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Te
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    data = (c_float * size)(0.0)
+    data = (c_float * size)()
+    SimdTensorBackend.tensor_fill_zeros(data, size)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
@@ -974,9 +977,14 @@ def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    data = (c_float * size)(*[1.0] * size)
-    return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
+    
+    # Allocate raw float buffer
+    buffer = (c_float * size)()
 
+    # Fill with ones using SIMD backend
+    SimdTensorBackend.tensor_fill_ones(buffer, size)
+
+    return Tensor(buffer, requires_grad=requires_grad, shape=shape, size=size)
 
 def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
     """
@@ -992,8 +1000,7 @@ def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
     data = (c_float * size)()
-    for i in range(size):
-        data[i] = random.random()
+    SimdTensorBackend.tensor_fill_rand(data, size)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def randn(shape: Union[int, Tuple[int, ...]], mean: float = 0.0, std: float = 1.0, requires_grad: bool = False) -> Tensor:
@@ -1012,11 +1019,7 @@ def randn(shape: Union[int, Tuple[int, ...]], mean: float = 0.0, std: float = 1.
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
     data = (c_float * size)()
-    for i in range(size):
-        # Box-Muller transform for normal distribution
-        u1, u2 = random.random(), random.random()
-        z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
-        data[i] = mean + std * z
+    SimdTensorBackend.tensor_fill_randn(data, size, mean, std)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def from_ctypes(ptr, shape, size, requires_grad=False):

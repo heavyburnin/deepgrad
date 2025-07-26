@@ -2,8 +2,9 @@ import unittest
 import math
 import random
 import numpy as np
-from typing import Tuple
+import ctypes
 from deepgrad.tensor import Tensor, zeros, ones, rand, randn
+from deepgrad.batchnorm import BatchNorm2D
 
 class TestDeepGradTensor(unittest.TestCase):
     def assertTensorEqual(self, tensor: Tensor, expected: np.ndarray, tol: float = 1e-6):
@@ -25,6 +26,19 @@ class TestDeepGradTensor(unittest.TestCase):
         """Set up test fixtures."""
         random.seed(42)  # For reproducible random tests
         np.random.seed(42)
+
+    def test_batchnrom(self):
+        B, C, H, W = 2, 3, 1, 1
+        arr = np.random.randn(B, C, H, W).astype(np.float32)
+        flat = arr.flatten()
+        ctypes_arr = (ctypes.c_float * flat.size)(*flat)
+        x = Tensor(ctypes_arr, shape=arr.shape, size=flat.size, requires_grad=True)
+        bn = BatchNorm2D(C)
+        out = bn(x)
+        out.sum().backward()
+
+        print("Gamma grad:", list(bn.gamma.grad))
+        print("Beta grad:", list(bn.beta.grad))
 
     def test_tensor_creation(self):
         """Test tensor creation with various inputs."""

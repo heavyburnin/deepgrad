@@ -146,23 +146,20 @@ class BatchNorm2D:
                     c_float(self.eps)
                 )
 
-                if x.grad is None:
-                    x.grad = dx
-                else:
-                    for i in range(x.size):
-                        x.grad[i] += dx[i]
-
                 if self.gamma.requires_grad:
                     if self.gamma.grad is None:
                         self.gamma.grad = (c_float * C)()
-                    for i in range(C):
-                        self.gamma.grad[i] += dgamma[i]
+                    SimdTensorBackend.accumulate_grad_avx(self.gamma.grad, dgamma, c_size_t(C))
 
                 if self.beta.requires_grad:
                     if self.beta.grad is None:
                         self.beta.grad = (c_float * C)()
-                    for i in range(C):
-                        self.beta.grad[i] += dbeta[i]
+                    SimdTensorBackend.accumulate_grad_avx(self.beta.grad, dbeta, c_size_t(C))
+
+                if x.grad is None:
+                    x.grad = dx
+                else:
+                    SimdTensorBackend.accumulate_grad_avx(x.grad, dx, c_size_t(x.size))
 
             out._backward = _backward
             out._prev = [x, self.gamma, self.beta]

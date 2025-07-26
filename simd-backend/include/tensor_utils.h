@@ -47,4 +47,13 @@ void zero_float_array(float *data, size_t size);
 // Gradient Utilities
 void sanitize_gradients(float* data, size_t size);
 
+void tensor_dropout(const float* input, float* output, float* mask, size_t size, float p, float scale);
+void tensor_fill_zeros(float* output, size_t size);
+void tensor_fill_ones(float* output, size_t size);
+void tensor_fill_rand(float* output, size_t size);
+void tensor_fill_randn(float* output, size_t size, float mean, float std);
+
+void accumulate_grad(float* grad, const float* dgrad, size_t size);
+void accumulate_grad_avx(float* grad, const float* dgrad, size_t size);
+
 #endif // TENSOR_UTILS_H

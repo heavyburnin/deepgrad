@@ -977,14 +977,9 @@ def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    
-    # Allocate raw float buffer
-    buffer = (c_float * size)()
-
-    # Fill with ones using SIMD backend
-    SimdTensorBackend.tensor_fill_ones(buffer, size)
-
-    return Tensor(buffer, requires_grad=requires_grad, shape=shape, size=size)
+    data = (c_float * size)()
+    SimdTensorBackend.tensor_fill_ones(data, size)
+    return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
     """

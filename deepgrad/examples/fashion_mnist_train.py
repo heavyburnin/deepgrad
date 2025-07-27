@@ -7,13 +7,13 @@ from ctypes import c_float, c_int, POINTER, cast, memmove, addressof
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import trange, tqdm
 from deepgrad.tensor import Tensor
-from deepgrad.model import FashionConvNet
+from deepgrad.model import FashionConvNetasdf
 from deepgrad.optim import AdamW
 
 # --- Constants ---
 INPUT_SIZE = 784
 IMAGE_SHAPE = (1, 28, 28)
-BATCH_SIZE = 512
+BATCH_SIZE = 32
 PASSES = 25
 TRAIN_BIN = 'deepgrad/examples/datasets/fashion_mnist_train.bin'
 TEST_BIN = 'deepgrad/examples/datasets/fashion_mnist_test.bin'
@@ -52,7 +52,7 @@ def build_batch(mm, indices, input_size, x_buf, y_buf):
 
 # --- Model Wrapper ---
 class Model:
-    def __init__(self): self.model = FashionConvNet()
+    def __init__(self): self.model = FashionConvNetasdf()
     def __call__(self, x): return self.model(x)
     def parameters(self): return self.model.parameters()
     def train(self): self.model.train()
@@ -92,7 +92,7 @@ def main():
 
     model = Model()
     model.train()
-    opt = AdamW(model.parameters(), lr=0.001, beta1=0.9, beta2=0.99, weight_decay=0.0001)
+    opt = AdamW(model.parameters(), lr=0.001, beta1=0.9, beta2=0.99, weight_decay=0.001)
 
     executor = ThreadPoolExecutor(max_workers=1)
     batches_per_epoch = (n_train + BATCH_SIZE - 1) // BATCH_SIZE
@@ -103,6 +103,9 @@ def main():
     future = executor.submit(build_batch, mm_train, indices, INPUT_SIZE, x_buf, y_buf)
 
     for step in trange(total_steps, desc="Training", ncols=100):
+        if (step + 1) % batches_per_epoch == 11:
+            opt.weight_decay = 0.0001
+            
         batch_idx = step % batches_per_epoch
         start = batch_idx * BATCH_SIZE
         end = min(start + BATCH_SIZE, n_train)
@@ -120,7 +123,7 @@ def main():
         y = Tensor.from_ctypes(y_buf, requires_grad=False, shape=(len(indices),), size=len(indices))
 
         opt.zero_grad_c()
-        loss = model(x).cross_entropy(y, label_smoothing=0.05, use_label_smoothing=1)
+        loss = model(x).cross_entropy(y, label_smoothing=0.10, use_label_smoothing=1)
         loss.backward()
         opt.step()
         loss.release_graph()

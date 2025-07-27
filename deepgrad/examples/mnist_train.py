@@ -6,7 +6,7 @@ from ctypes import c_float, c_int, POINTER, cast, memmove, addressof
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import trange, tqdm
 from deepgrad.tensor import Tensor
-from deepgrad.model import MNISTConvNet
+from deepgrad.model import MNISTNet
 from deepgrad.optim import Adam
 
 # --- Constants ---
@@ -51,7 +51,7 @@ def build_batch(mm, indices, input_size, x_buf, y_buf):
 
 # --- Model Wrapper ---
 class Model:
-    def __init__(self): self.model = MNISTConvNet()
+    def __init__(self): self.model = MNISTNet()
     def __call__(self, x): return self.model(x)
     def parameters(self): return self.model.parameters()
     def train(self): self.model.train()

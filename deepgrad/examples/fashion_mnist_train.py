@@ -7,13 +7,13 @@ from ctypes import c_float, c_int, POINTER, cast, memmove, addressof
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import trange, tqdm
 from deepgrad.tensor import Tensor
-from deepgrad.model import FashionConvNetasdf
+from deepgrad.model import FashionNet
 from deepgrad.optim import AdamW
 
 # --- Constants ---
 INPUT_SIZE = 784
 IMAGE_SHAPE = (1, 28, 28)
-BATCH_SIZE = 32
+BATCH_SIZE = 512
 PASSES = 25
 TRAIN_BIN = 'deepgrad/examples/datasets/fashion_mnist_train.bin'
 TEST_BIN = 'deepgrad/examples/datasets/fashion_mnist_test.bin'
@@ -52,7 +52,7 @@ def build_batch(mm, indices, input_size, x_buf, y_buf):
 
 # --- Model Wrapper ---
 class Model:
-    def __init__(self): self.model = FashionConvNetasdf()
+    def __init__(self): self.model = FashionNet()
     def __call__(self, x): return self.model(x)
     def parameters(self): return self.model.parameters()
     def train(self): self.model.train()

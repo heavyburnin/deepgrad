@@ -10,7 +10,7 @@ deepgrad/examples/datasets/fashion_mnist_train.bin
 deepgrad/examples/datasets/fashion_mnist_test.csv
 deepgrad/examples/datasets/fashion_mnist_test.bin
 
-deepgrad/examples/datasets/lichess.py
+deepgrad/examples/datasets/lichess.pgn
 
 deepgrad/examples/mnist_model.pkl
 deepgrad/examples/fashion_model.pkl

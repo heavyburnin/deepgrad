@@ -138,65 +138,6 @@ class FashionNet:
         self.bn1.training = False
         self.bn2.training = False
 
-class ChessNet:
-    def __init__(self):
-        self.training = True
-
-        # Chess board input: 8x8 board with 12 channels (6 piece types x 2 colors)
-        # Conv1: 12 → 64, 3x3
-        self.w1 = Tensor.randn((64, 12, 3, 3), std=math.sqrt(2 / (12 * 3 * 3)), requires_grad=True)
-        self.b1 = Tensor.zeros((64,), requires_grad=True)
-        self.bn1 = BatchNorm2D(64)
-
-        # Conv2: 64 → 128, 3x3
-        self.w2 = Tensor.randn((128, 64, 3, 3), std=math.sqrt(2 / (64 * 3 * 3)), requires_grad=True)
-        self.b2 = Tensor.zeros((128,), requires_grad=True)
-        self.bn2 = BatchNorm2D(128)
-
-        # FC1: 128 * 2 * 2 → 512 (after 2x maxpool: 8x8 → 4x4 → 2x2)
-        self.w3 = Tensor.randn((128 * 2 * 2, 512), std=math.sqrt(2 / (128 * 2 * 2)), requires_grad=True)
-        self.b3 = Tensor.zeros((1, 512), requires_grad=True)
-
-        # FC2: 512 → 3 (classification for win/loss/draw)
-        self.w4 = Tensor.randn((512, 3), std=math.sqrt(2 / 512), requires_grad=True)
-        self.b4 = Tensor.zeros((1, 3), requires_grad=True)
-
-    def __call__(self, x: Tensor) -> Tensor:
-        # Input x: (batch_size, 12, 8, 8) for 12 piece channels, 8x8 board
-        # Conv block 1
-        x = x.conv2d(self.w1, self.b1, stride=(1, 1), padding=(1, 1))  # Output: (batch_size, 64, 8, 8)
-        x = self.bn1(x).relu().maxpool2d(kernel_size=2, stride=2)  # Output: (batch_size, 64, 4, 4)
-
-        # Conv block 2
-        x = x.conv2d(self.w2, self.b2, stride=(1, 1), padding=(1, 1))  # Output: (batch_size, 128, 4, 4)
-        x = self.bn2(x).relu().maxpool2d(kernel_size=2, stride=2)  # Output: (batch_size, 128, 2, 2)
-
-        # Flatten and FC
-        x = x.flatten(start_dim=1)  # Shape: (batch_size, 128 * 2 * 2)
-        x = (x.matmul(self.w3) + self.b3).relu()
-
-        # Output: 3 values for classification (win/loss/draw)
-        return x.matmul(self.w4) + self.b4
-
-    def parameters(self):
-        return [
-            self.w1, self.b1,
-            self.w2, self.b2,
-            self.w3, self.b3,
-            self.w4, self.b4,
-            *self.bn1.parameters(),
-            *self.bn2.parameters(),
-        ]
-
-    def train(self):
-        self.training = True
-        self.bn1.training = True
-        self.bn2.training = True
-
-    def eval(self):
-        self.training = False
-        self.bn1.training = False
-        self.bn2.training = False
 class FashionConvNetasdf:
     def __init__(self):
         self.training = True

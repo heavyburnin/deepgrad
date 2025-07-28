@@ -1,363 +1,386 @@
-import random
+import random, math, os, dill, copy
 import chess
-import math
 from tqdm import tqdm
 from deepgrad.tensor import Tensor
 from deepgrad.batchnorm import BatchNorm2D
 from deepgrad.optim import Adam
-import dill
+import numpy as np
 
-# Board Representation
-def board_to_tensor(board):
-    """
-    Convert a chess board to a tensor of shape (12, 8, 8) from the perspective of the player to move.
-    12 channels: 6 piece types (P, N, B, R, Q, K) x 2 colors (white, black).
-    Flips the board if Black is to move.
-    """
+# --- Board Encoding and Symmetry Augmentation ---
+def board_to_tensor(board, augment=False):
     data = [0.0] * (12 * 8 * 8)
-    piece_map = board.piece_map()
-    for square, piece in piece_map.items():
-        rank = square // 8
-        file = square % 8
+    for square, piece in board.piece_map().items():
+        rank, file = divmod(square, 8)
         rank = 7 - rank if board.turn == chess.BLACK else rank
-        color_idx = 0 if piece.color == chess.WHITE else 6
-        piece_idx = {'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5}[piece.symbol().upper()]
-        if board.turn == chess.BLACK:
-            color_idx = 6 - color_idx if color_idx < 6 else color_idx - 6
-        channel = color_idx + piece_idx
-        idx = channel * 64 + rank * 8 + file
-        data[idx] = 1.0
-    return Tensor(data, shape=(12, 8, 8), requires_grad=False)
+        color_offset = 0 if piece.color == chess.WHITE else 6
+        piece_type = {'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5}[piece.symbol().upper()]
+        channel = color_offset + piece_type
+        data[channel * 64 + rank * 8 + file] = 1.0
+    tensor = Tensor(data, shape=(12, 8, 8), requires_grad=False)
+    
+    if augment and random.random() < 0.5:
+        # Horizontal flip
+        data = np.array(data).reshape(12, 8, 8)
+        data = np.flip(data, axis=2).flatten()
+        tensor = Tensor(data.tolist(), shape=(12, 8, 8), requires_grad=False)
+    return tensor
 
-# Move Encoding (AlphaZero-style 73 planes)
-DIRECTIONS = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]  # N, NE, E, SE, S, SW, W, NW
+# --- Policy Indexing (AlphaZero style) ---
+DIRECTIONS = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
 KNIGHT_MOVES = [(-2, 1), (-1, 2), (1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1)]
 
-def move_to_plane_row_col(board, move):
-    """
-    Convert a chess move to a (plane, row, col) tuple for AlphaZero's 73-plane policy encoding.
-    Handles piece movements, knight moves, and promotions. Flips ranks for Black's perspective.
-
-    Args:
-        board: chess.Board object representing the current board state.
-        move: chess.Move object representing the move to encode.
-
-    Returns:
-        Tuple (plane, row, col) where plane is the policy plane index (0-72),
-        row and col are the destination square coordinates (0-7).
-    """
-    from_sq = move.from_square
-    to_sq = move.to_square
-    piece = board.piece_at(from_sq)
+def move_to_plane_row_col(board, move, flipped=False):
+    from_sq, to_sq = move.from_square, move.to_square
     from_row, from_col = divmod(from_sq, 8)
     to_row, to_col = divmod(to_sq, 8)
-    if not board.turn:  # Black to move, flip ranks
+    if not board.turn:
         from_row, to_row = 7 - from_row, 7 - to_row
+    if flipped:
+        from_col, to_col = 7 - from_col, 7 - to_col
     delta_row, delta_col = to_row - from_row, to_col - from_col
     distance = max(abs(delta_row), abs(delta_col))
 
-    if piece.piece_type == chess.KNIGHT:
+    if board.piece_at(from_sq).piece_type == chess.KNIGHT:
         for i, (dr, dc) in enumerate(KNIGHT_MOVES):
             if (dr, dc) == (delta_row, delta_col):
                 return 56 + i, to_row, to_col
-    elif move.promotion and piece.piece_type == chess.PAWN:
-        promotion_piece = move.promotion
-        direction = 0 if delta_col == 0 else (-1 if delta_col < 0 else 1)
-        base_plane = {'N': 64, 'B': 67, 'R': 70}.get(chess.piece_symbol(promotion_piece).upper(), 0)
-        if base_plane == 0:  # Queen promotion uses sliding planes
-            for i, (dr, dc) in enumerate(DIRECTIONS):
-                if distance > 0 and (dr, dc) == (delta_row // distance, delta_col // distance):
-                    return i * 7 + (distance - 1), to_row, to_col
-        else:
-            plane = base_plane + (1 if direction < 0 else 2 if direction > 0 else 0)
-            return plane, to_row, to_col
     else:
         for i, (dr, dc) in enumerate(DIRECTIONS):
             if distance > 0 and (dr, dc) == (delta_row // distance, delta_col // distance):
                 return i * 7 + (distance - 1), to_row, to_col
-    return 0, to_row, to_col  # Default for castling or edge cases
+    return 0, to_row, to_col
 
-def get_policy_index(board, move):
-    plane, row, col = move_to_plane_row_col(board, move)
+def get_policy_index(board, move, flipped=False):
+    plane, row, col = move_to_plane_row_col(board, move, flipped)
+    if flipped:
+        col = 7 - col
     return plane * 64 + row * 8 + col
 
-def get_legal_indices(board):
-    indices = [get_policy_index(board, move) for move in board.legal_moves]
-    return indices
-
-# Neural Network
+# --- Model (ResNet-style) ---
 class ChessNet:
-    def __init__(self):
-        self.training = True
-        self.num_planes = 73  # AlphaZero's 73-plane encoding
-        self.num_moves = self.num_planes * 64  # 73 * 8 * 8
-        self.w1 = Tensor.randn((64, 12, 3, 3), std=math.sqrt(2 / (12 * 3 * 3)), requires_grad=True)
-        self.b1 = Tensor.zeros((64,), requires_grad=True)
-        self.bn1 = BatchNorm2D(64)
-        self.w2 = Tensor.randn((128, 64, 3, 3), std=math.sqrt(2 / (64 * 3 * 3)), requires_grad=True)
-        self.b2 = Tensor.zeros((128,), requires_grad=True)
-        self.bn2 = BatchNorm2D(128)
-        self.policy_w = Tensor.randn((128 * 2 * 2, self.num_moves), std=math.sqrt(2 / (128 * 2 * 2)), requires_grad=True)
-        self.policy_b = Tensor.zeros((1, self.num_moves), requires_grad=True)
-        self.value_w1 = Tensor.randn((128 * 2 * 2, 512), std=math.sqrt(2 / (128 * 2 * 2)), requires_grad=True)
-        self.value_b1 = Tensor.zeros((1, 512), requires_grad=True)
-        self.value_w2 = Tensor.randn((512, 1), std=math.sqrt(2 / 512), requires_grad=True)
-        self.value_b2 = Tensor.zeros((1, 1), requires_grad=True)
+    def __init__(self, num_blocks=10, num_filters=128):
+        self.num_filters = num_filters
+        # Initial conv layer
+        self.w1 = Tensor.randn((num_filters, 12, 3, 3), std=0.1, requires_grad=True)
+        self.b1 = Tensor.zeros((num_filters,), requires_grad=True)
+        self.bn1 = BatchNorm2D(num_filters)
+        
+        # Residual blocks
+        self.res_blocks = []
+        for _ in range(num_blocks):
+            w1 = Tensor.randn((num_filters, num_filters, 3, 3), std=0.1, requires_grad=True)
+            b1 = Tensor.zeros((num_filters,), requires_grad=True)
+            bn1 = BatchNorm2D(num_filters)
+            w2 = Tensor.randn((num_filters, num_filters, 3, 3), std=0.1, requires_grad=True)
+            b2 = Tensor.zeros((num_filters,), requires_grad=True)
+            bn2 = BatchNorm2D(num_filters)
+            self.res_blocks.append((w1, b1, bn1, w2, b2, bn2))
+        
+        # Policy head (adjusted to match feature map size after pooling)
+        self.policy_conv = Tensor.randn((num_filters, num_filters, 1, 1), std=0.1, requires_grad=True)
+        self.policy_b = Tensor.zeros((num_filters,), requires_grad=True)
+        self.policy_bn = BatchNorm2D(num_filters)
+        self.policy_w = Tensor.randn((num_filters * 8 * 8, 4672), std=0.1, requires_grad=True)
+        self.policy_b2 = Tensor.zeros((4672,), requires_grad=True)
+        
+        # Value head
+        self.value_conv = Tensor.randn((1, num_filters, 1, 1), std=0.1, requires_grad=True)
+        self.value_b = Tensor.zeros((1,), requires_grad=True)
+        self.value_bn = BatchNorm2D(1)
+        self.value_w1 = Tensor.randn((1 * 8 * 8, 512), std=0.1, requires_grad=True)
+        self.value_b1 = Tensor.zeros((512,), requires_grad=True)
+        self.value_w2 = Tensor.randn((512, 1), std=0.1, requires_grad=True)
+        self.value_b2 = Tensor.zeros((1,), requires_grad=True)
 
-    def __call__(self, x: Tensor):
+    def __call__(self, x):
+        # Initial conv
         x = x.conv2d(self.w1, self.b1, stride=(1, 1), padding=(1, 1))
-        x = self.bn1(x).relu().maxpool2d(kernel_size=2, stride=2)
-        x = x.conv2d(self.w2, self.b2, stride=(1, 1), padding=(1, 1))
-        x = self.bn2(x).relu().maxpool2d(kernel_size=2, stride=2)
-        x = x.flatten(start_dim=1)
-        policy = x.matmul(self.policy_w) + self.policy_b
-        value = (x.matmul(self.value_w1) + self.value_b1).relu()
+        x = self.bn1(x).relu()
+        
+        # Residual blocks
+        for w1, b1, bn1, w2, b2, bn2 in self.res_blocks:
+            residual = x
+            x = x.conv2d(w1, b1, stride=(1, 1), padding=(1, 1))
+            x = bn1(x).relu()
+            x = x.conv2d(w2, b2, stride=(1, 1), padding=(1, 1))
+            x = bn2(x)
+            x = x + residual
+            x = x.relu()
+        
+        # Policy head
+        policy = x.conv2d(self.policy_conv, self.policy_b, stride=(1, 1), padding=(0, 0))
+        policy = self.policy_bn(policy).relu()
+        policy = policy.flatten(start_dim=1)
+        policy = policy.matmul(self.policy_w) + self.policy_b2
+        
+        # Value head
+        value = x.conv2d(self.value_conv, self.value_b, stride=(1, 1), padding=(0, 0))
+        value = self.value_bn(value).relu()
+        value = value.flatten(start_dim=1)
+        value = (value.matmul(self.value_w1) + self.value_b1).relu()
         value = (value.matmul(self.value_w2) + self.value_b2).tanh()
+        
         return policy, value
 
     def parameters(self):
-        return [
-            self.w1, self.b1, self.w2, self.b2,
-            self.policy_w, self.policy_b,
-            self.value_w1, self.value_b1, self.value_w2, self.value_b2,
-            *self.bn1.parameters(), *self.bn2.parameters()
-        ]
+        params = [self.w1, self.b1, self.policy_conv, self.policy_b, self.policy_w, self.policy_b2,
+                 self.value_conv, self.value_b, self.value_w1, self.value_b1, self.value_w2, self.value_b2,
+                 *self.bn1.parameters(), *self.policy_bn.parameters(), *self.value_bn.parameters()]
+        for w1, b1, bn1, w2, b2, bn2 in self.res_blocks:
+            params.extend([w1, b1, w2, b2, *bn1.parameters(), *bn2.parameters()])
+        return params
 
-    def train(self):
-        self.training = True
-        self.bn1.training = True
-        self.bn2.training = True
+    def copy(self):
+        return copy.deepcopy(self)
 
-    def eval(self):
-        self.training = False
-        self.bn1.training = False
-        self.bn2.training = False
-
-# Model Wrapper
-class Model:
-    def __init__(self):
-        self.model = ChessNet()
-    
-    def __call__(self, x):
-        return self.model(x)
-
-    def parameters(self):
-        return self.model.parameters()
-
-    def train(self):
-        self.model.train()
-
-    def eval(self):
-        self.model.eval()
-
-# Monte Carlo Tree Search
-class MCTSNode:
-    def __init__(self, board, parent=None, move=None):
+# --- MCTS with Dirichlet Noise ---
+class Node:
+    def __init__(self, board, parent=None, prior=0.0):
         self.board = board
         self.parent = parent
-        self.move = move
         self.children = {}
-        self.N = 0  # Visit count
-        self.W = 0.0  # Total value
-        self.P = 0.0  # Prior probability
+        self.P = prior
+        self.N = 0
+        self.W = 0.0
+        self.Q = 0.0
+
+    def is_expanded(self):
+        return bool(self.children)
+
+    def expand(self, model, is_root=False, dirichlet_alpha=0.3):
+        tensor = board_to_tensor(self.board)
+        policy_logits, value = model(Tensor(tensor.data, shape=(1, 12, 8, 8)))
+        policy_logits = policy_logits.data
+        legal_moves = list(self.board.legal_moves)
+        total_logits = [math.exp(policy_logits[get_policy_index(self.board, m)]) for m in legal_moves]
+        total = sum(total_logits) + 1e-8
+        priors = [p / total for p in total_logits]
+
+        if is_root:
+            dirichlet_noise = np.random.dirichlet([dirichlet_alpha] * len(legal_moves))
+            priors = [0.75 * p + 0.25 * n for p, n in zip(priors, dirichlet_noise)]
+
+        for move, prior in zip(legal_moves, priors):
+            new_board = self.board.copy()
+            new_board.push(move)
+            self.children[move] = Node(new_board, parent=self, prior=prior)
+        return float(value.data[0])
+
+    def select_child(self, c_puct=1.0):
+        if not self.children:
+            return None, None  # Handle case with no children
+        def ucb_score(child):
+            return child.Q + c_puct * child.P * math.sqrt(self.N + 1e-8) / (1 + child.N)
+        return max(self.children.items(), key=lambda item: ucb_score(item[1]))
+
+    def backprop(self, value):
+        self.N += 1
+        self.W += value
+        self.Q = self.W / self.N
+        if self.parent:
+            self.parent.backprop(-value)
 
 class MCTS:
-    def __init__(self, model, num_simulations=50, c_puct=1.0):
+    def __init__(self, model, sims=100):
         self.model = model
-        self.num_simulations = num_simulations
-        self.c_puct = c_puct
+        self.sims = sims
 
-    def search(self, board):
-        root = MCTSNode(board.copy())
-        for sim in tqdm(range(self.num_simulations), desc="MCTS simulations", leave=False):
-            node = self.select(root)
-            value = self.simulate(node)
-            self.backpropagate(node, value)
-        move_probs = {}
-        for move, child in root.children.items():
-            move_probs[move] = child.N / root.N if root.N > 0 else 0.0
-        return move_probs
+    def run(self, board):
+        root = Node(board)
+        root.expand(self.model, is_root=True)
 
-    def select(self, node):
-        while node.children and all(move in node.children for move in node.board.legal_moves):
-            node = max(node.children.values(), key=lambda n: self.ucb(n))
-        if not node.board.is_game_over():
-            legal_moves = list(node.board.legal_moves)
-            if not legal_moves:
-                return node
-            if not node.children:
-                policy, value = self.evaluate(node.board)
-                for move, p in zip(legal_moves, policy):
-                    child = MCTSNode(node.board.copy(), node, move)
-                    child.P = p
-                    node.children[move] = child
-                return node
-            move = random.choice([m for m in legal_moves if m not in node.children])
-            child = MCTSNode(node.board.copy(), node, move)
-            node.children[move] = child
-            node = child
-            node.board.push(move)
-        return node
+        for _ in range(self.sims):
+            node = root
+            search_path = [node]
+            while node.is_expanded():
+                move, node = node.select_child()
+                search_path.append(node)
 
-    def ucb(self, node):
-        Q = node.W / node.N if node.N > 0 else 0
-        return Q + self.c_puct * node.P * math.sqrt(node.parent.N) / (1 + node.N)
+            value = node.expand(self.model)
+            for n in reversed(search_path):
+                n.backprop(value)
 
-    def evaluate(self, board):
-        tensor = board_to_tensor(board)
-        inputs = Tensor(tensor.data, shape=(1, 12, 8, 8), requires_grad=False)
-        self.model.eval()
-        policy_logits, value = self.model(inputs)
-        legal_indices = get_legal_indices(board)
-        policy = [policy_logits.data[idx] for idx in legal_indices]
-        if not policy:
-            logsumexp_legal = float('-inf')
+        move_visits = {m: child.N for m, child in root.children.items()}
+        total_visits = sum(move_visits.values())
+        policy = {m: n / total_visits for m, n in move_visits.items()}
+        return policy, root
+
+# --- Dataset Loader with Augmentation ---
+class ChessDataset:
+    def __init__(self, games):
+        self.games = games
+
+    def __len__(self):
+        return len(self.games)
+
+    def __getitem__(self, idx):
+        fen, state, policy, value = self.games[idx]
+        return state, policy, value
+
+    def get_batch(self, batch_size):
+        indices = np.random.choice(len(self.games), batch_size, replace=False)
+        states, policies, values = [], [], []
+        for idx in indices:
+            fen, state, policy, value = self.games[idx]
+            flipped = random.random() < 0.5
+            states.append(board_to_tensor(chess.Board(fen), augment=flipped).data)
+            policies.append(self.encode_policy(chess.Board(fen), policy, flipped))
+            values.append(value)
+        return (Tensor(np.array(states), shape=(batch_size, 12, 8, 8)),
+                Tensor(np.array(policies), shape=(batch_size, 4672)),
+                Tensor(np.array(values), shape=(batch_size, 1)))
+
+    def encode_policy(self, board, move_probs, flipped=False):
+        arr = [0.0] * 4672
+        for move, prob in move_probs.items():
+            idx = get_policy_index(board, move, flipped)
+            arr[idx] = prob
+        return arr
+
+# --- Model Evaluation ---
+def evaluate_models(model_new, model_old, num_games=10):
+    wins, losses, draws = 0, 0, 0
+    for _ in range(num_games):
+        board = chess.Board()
+        mcts_new = MCTS(model_new, sims=100)
+        mcts_old = MCTS(model_old, sims=100)
+        while not board.is_game_over():
+            policy = (mcts_new if board.turn == chess.WHITE else mcts_old).run(board)[0]
+            move = random.choices(list(policy.keys()), weights=list(policy.values()))[0]
+            board.push(move)
+        result = board.result()
+        if result == '1-0':
+            wins += 1 if board.turn == chess.BLACK else 0
+            losses += 1 if board.turn == chess.WHITE else 0
+        elif result == '0-1':
+            wins += 1 if board.turn == chess.WHITE else 0
+            losses += 1 if board.turn == chess.BLACK else 0
         else:
-            max_val = max(policy)
-            exp_sum = sum(math.exp(x - max_val) for x in policy)
-            logsumexp_legal = max_val + math.log(exp_sum) if exp_sum > 0 else float('-inf')
-        policy = [math.exp(p - logsumexp_legal) for p in policy]
-        return policy, value.data[0]
+            draws += 1
+    return wins, losses, draws
 
-    def simulate(self, node):
-        return self.evaluate(node.board)[1]
-    
-    def backpropagate(self, node, value):
-        sign = 1
-        current = node
-        while current:
-            current.N += 1
-            current.W += sign * value
-            sign = -sign
-            current = current.parent
+# --- Training ---
+class Trainer:
+    def __init__(self):
+        self.model = ChessNet(num_blocks=10, num_filters=128)
+        self.optimizer = Adam(self.model.parameters(), lr=0.001)
+        self.games = []
+        self.memory_size = 10000
+        self.best_model = self.model.copy()
+        self.best_model_filename = "deepgrad/examples/models/best_model.pkl"
 
-# AlphaZero Trainer
-class ChessTrainer:
-    def __init__(self, batch_size=32, num_games=5, num_simulations=50, learning_rate=0.001):
-        self.model = Model()
-        self.batch_size = batch_size
-        self.num_games = num_games
-        self.num_simulations = num_simulations
-        self.mcts = MCTS(self.model, num_simulations)
-        self.memory = []
-        self.optimizer = Adam(self.model.parameters(), lr=learning_rate)
-
-    def self_play(self):
-        for game_idx in tqdm(range(self.num_games), desc="Self-play games"):
+    def self_play(self, num_games=10, model=None):
+        model = model or self.best_model  # Use fixed snapshot
+        mcts = MCTS(model, sims=100)
+        for _ in tqdm(range(num_games), desc="Self-Play"):
             board = chess.Board()
-            game_data = []
+            game = []
             move_count = 0
-            max_moves = 100
-            while not board.is_game_over() and move_count < max_moves:
-                move_probs = self.mcts.search(board)
-                moves = list(move_probs.keys())
-                probs = list(move_probs.values())
-                if not moves:
-                    break
-                move = random.choices(moves, weights=probs, k=1)[0]
-                game_data.append((board_to_tensor(board), move_probs, board.copy()))
+            while not board.is_game_over():
+                temperature = 1.0 if move_count < 30 else 0.1  # Temperature annealing
+                policy, root = mcts.run(board)
+                moves, probs = list(policy.keys()), list(policy.values())
+                probs = [p ** (1 / temperature) for p in probs]
+                total = sum(probs) + 1e-8
+                probs = [p / total for p in probs]
+                move = random.choices(moves, weights=probs)[0]
+                game.append((board.fen(), board_to_tensor(board).data, policy.copy(), None))
                 board.push(move)
                 move_count += 1
-            outcome = 1 if board.result() == "1-0" else -1 if board.result() == "0-1" else 0
-            for tensor, probs, board in game_data:
-                self.memory.append((tensor, probs, outcome, board))
-            if len(self.memory) > 10000:
-                self.memory = self.memory[-10000:]
+            outcome = 1 if board.result() == '1-0' else -1 if board.result() == '0-1' else 0
+            for i, (fen, tensor_data, move_probs, _) in enumerate(game):
+                outcome_signed = outcome if chess.Board(fen).turn == chess.WHITE else -outcome
+                game[i] = (fen, tensor_data, move_probs, outcome_signed)
+            self.games.extend(game)
+        if len(self.games) > self.memory_size:
+            self.games = self.games[-self.memory_size:]
 
-    def train(self, num_iterations=10):
-        for iteration in tqdm(range(num_iterations), desc="Training iterations"):
-            self.self_play()
-            if not self.memory:
-                continue
-            random.shuffle(self.memory)
-            for i in tqdm(range(0, len(self.memory), self.batch_size), desc="Training batches"):
-                batch = self.memory[i:i + self.batch_size]
-                batch_size = len(batch)
-                input_data = [d[0].data for d in batch]
-                flat_data = []
-                for tensor_data in input_data:
-                    flat_data.extend(tensor_data)
-                inputs = Tensor(flat_data, shape=(batch_size, 12, 8, 8))
-                
-                target_values = []
-                for d in batch:
-                    value = d[2] if d[3].turn == chess.WHITE else -d[2]
-                    target_values.append(value)
-                target_values = Tensor(target_values, shape=(batch_size, 1))
-                
-                target_indices = []
-                for _, probs, _, board in batch:
-                    best_move_index = 0
-                    max_prob = -float('inf')
-                    for move, p in probs.items():
-                        idx = get_policy_index(board, move)
-                        if p > max_prob:
-                            max_prob = p
-                            best_move_index = idx
-                    target_indices.append(best_move_index)
-                target_indices = Tensor(target_indices, shape=(batch_size,), size=batch_size)
+    def loss_function(self, policy_logits, target_policy, value, target_value):
+        batch_size, policy_dim = policy_logits.shape
+        exp_logits = Tensor([math.exp(policy_logits.data[i]) for i in range(policy_logits.size)], shape=policy_logits.shape)
+        exp_sum = Tensor.zeros((batch_size, 1))
+        for b in range(batch_size):
+            sum_val = 0.0
+            for i in range(policy_dim):
+                sum_val += exp_logits.data[b * policy_dim + i]
+            exp_sum.data[b] = sum_val
+        log_softmax = Tensor([math.log(exp_logits.data[i] / exp_sum.data[i // policy_dim]) for i in range(policy_logits.size)], shape=policy_logits.shape)
+        policy_loss = -Tensor.sum(target_policy * log_softmax) / batch_size
+        value_loss = ((value - target_value) ** 2).mean()
+        return policy_loss + value_loss
 
-                self.model.train()
+    def train(self, epochs=5, batch_size=32, games_per_epoch=10):
+        dataset = ChessDataset(self.games)
+        for epoch in range(epochs):
+            print(f"Starting epoch {epoch+1}/{epochs}")
+            self.self_play(num_games=games_per_epoch, model=self.best_model)
+            dataset.games = self.games
+            num_batches = len(dataset) // batch_size
+            total_loss = 0.0
+
+            for _ in tqdm(range(num_batches), desc=f"Training Epoch {epoch+1}"):
+                inputs, target_policy, target_value = dataset.get_batch(batch_size)
                 policy_logits, value = self.model(inputs)
-                policy_loss = policy_logits.cross_entropy(target_indices)
-                value_loss = ((value - target_values) ** 2).mean()
-                loss = policy_loss + value_loss
+                loss = self.loss_function(policy_logits, target_policy, value, target_value)
                 loss.backward()
                 self.optimizer.step()
-                self.optimizer.zero_grad_c()
+                self.optimizer.zero_grad()
+                total_loss += float(loss.data[0])
 
-            self.save_model(iteration)
+            avg_loss = total_loss / num_batches
+            print(f"Epoch {epoch+1} Average Loss: {avg_loss:.4f}")
 
-            # Policy Accuracy Evaluation
-            correct = 0
-            total = 0
-            for tensor, probs, _, board in self.memory:
-                input_tensor = Tensor(tensor.data, shape=(1, 12, 8, 8), requires_grad=False)
-                self.model.eval()
-                policy_logits, _ = self.model(input_tensor)
-                predicted_index = 0
-                max_value = policy_logits.data[0]
-                for i in range(1, len(policy_logits.data)):
-                    if policy_logits.data[i] > max_value:
-                        max_value = policy_logits.data[i]
-                        predicted_index = i
-                best_move_index = 0
-                max_prob = -float('inf')
-                for move, p in probs.items():
-                    idx = get_policy_index(board, move)
-                    if p > max_prob:
-                        max_prob = p
-                        best_move_index = idx
-                if predicted_index == best_move_index:
-                    correct += 1
-                total += 1
+            # Evaluate new model against best model
+            wins, losses, draws = evaluate_models(self.model, self.best_model, num_games=10)
+            print(f"Evaluation: Wins={wins}, Losses={losses}, Draws={draws}")
+            if wins > losses:
+                self.best_model = self.model.copy()
+                self.save_model(self.best_model_filename)
+                print("Updated best model")
 
-            if total > 0:
-                acc = correct / total
-                tqdm.write(f"[Iteration {iteration + 1}] Policy Accuracy: {acc:.4f}")
+            self.save_model(f"deepgrad/examples/models/model_epoch_{epoch+1}.pkl")
 
-    def select_move(self, board):
-        self.model.eval()
-        move_probs = self.mcts.search(board)
-        return max(move_probs.items(), key=lambda x: x[1])[0]
+    def save_model(self, filename):
+        def to_list(ctypes_array):
+            return list(ctypes_array)
+        parameters = {
+            'num_blocks': len(self.model.res_blocks),
+            'num_filters': self.model.num_filters,
+            'w1': to_list(self.model.w1.data),
+            'b1': to_list(self.model.b1.data),
+            'policy_w': to_list(self.model.policy_w.data),
+            'policy_b': to_list(self.model.policy_b.data),
+            'value_w1': to_list(self.model.value_w1.data),
+            'value_b1': to_list(self.model.value_b1.data),
+            'value_w2': to_list(self.model.value_w2.data),
+            'value_b2': to_list(self.model.value_b2.data),
+            'bn1_gamma': to_list(self.model.bn1.gamma.data),
+            'bn1_beta': to_list(self.model.bn1.beta.data),
+            'bn1_running_mean': to_list(self.model.bn1.running_mean) if hasattr(self.model.bn1, 'running_mean') else [0.0] * self.model.num_filters,
+            'bn1_running_var': to_list(self.model.bn1.running_var) if hasattr(self.model.bn1, 'running_var') else [1.0] * self.model.num_filters,
+            'res_blocks': [
+                {
+                    'w1': to_list(w1.data),
+                    'b1': to_list(b1.data),
+                    'w2': to_list(w2.data),
+                    'b2': to_list(b2.data),
+                    'bn1_gamma': to_list(bn1.gamma.data),
+                    'bn1_beta': to_list(bn1.beta.data),
+                    'bn1_running_mean': to_list(bn1.running_mean) if hasattr(bn1, 'running_mean') else [0.0] * self.model.num_filters,
+                    'bn1_running_var': to_list(bn1.running_var) if hasattr(bn1, 'running_var') else [1.0] * self.model.num_filters,
+                    'bn2_gamma': to_list(bn2.gamma.data),
+                    'bn2_beta': to_list(bn2.beta.data),
+                    'bn2_running_mean': to_list(bn2.running_mean) if hasattr(bn2, 'running_mean') else [0.0] * self.model.num_filters,
+                    'bn2_running_var': to_list(bn2.running_var) if hasattr(bn2, 'running_var') else [1.0] * self.model.num_filters
+                }
+                for w1, b1, bn1, w2, b2, bn2 in self.model.res_blocks
+            ]
+        }
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "wb") as f:
+            dill.dump(parameters, f)
 
-    def save_model(self, iteration):
-        with open(f"chess_model_iter_{iteration}.pkl", "wb") as f:
-            dill.dump(self.model, f)
-
-def play_game(trainer):
-    board = chess.Board()
-    move_count = 0
-    max_moves = 100
-    while not board.is_game_over() and move_count < max_moves:
-        move = trainer.select_move(board)
-        board.push(move)
-        move_count += 1
-
-def main():
-    trainer = ChessTrainer(batch_size=32, num_games=10, num_simulations=25, learning_rate=0.001)
-    trainer.train(num_iterations=10)
-    play_game(trainer)
-
+# --- Run ---
 if __name__ == "__main__":
-    main()
+    trainer = Trainer()
+    trainer.train(epochs=5, batch_size=32, games_per_epoch=10)

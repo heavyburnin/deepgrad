@@ -118,7 +118,7 @@ def main():
         x = Tensor.from_ctypes(x_buf, requires_grad=True, shape=(len(indices), *IMAGE_SHAPE), size=len(indices) * INPUT_SIZE)
         y = Tensor.from_ctypes(y_buf, requires_grad=False, shape=(len(indices),), size=len(indices))
 
-        opt.zero_grad_c()
+        opt.zero_grad()
         loss = model(x).cross_entropy(y, label_smoothing=0.05, use_label_smoothing=1)
         loss.backward()
         opt.step()

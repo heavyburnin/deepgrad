@@ -1,23 +1,27 @@
 # DeepGrad
 
-A lightweight, low-level tensor library for building and training neural networks in Python, with C‑SIMD acceleration.
+A lightweight, low-level tensor library for building and training neural networks in Python, with C-SIMD acceleration for high performance.
 
 ---
 
 ## 🔧 Features
 
-- **Core Tensor abstraction**: supports autograd, basic ops (`add`, `sub`, `mul`, `div`, `matmul`, `relu`, `sum`, `mean`)
-- **Gradient tracking & backprop**: `.backward()`, `.detach()`, `.requires_grad_()`
-- **Broadcasting**: full support for NumPy-style broadcasting in Python
-- **Optimizers**: built-in SGD
-- **Device support**: CPU backend (via C/SIMD)
-- **Examples**: includes an MLP training script on MNIST dataset
+- **Core Tensor Abstraction**: Supports autograd, basic arithmetic (`add`, `sub`, `mul`, `div`, `pow`), matrix multiplication (`matmul`), and element-wise operations (`relu`, `tanh`, `log_softmax`).
+- **Convolutional Operations**: Includes 2D convolution (`conv2d`), max pooling (`maxpool2d`), and average pooling (`avgpool2d`) for CNNs.
+- **Loss Functions**: Cross-entropy loss with optional label smoothing (`cross_entropy`).
+- **Dropout**: Supports dropout for regularization during training.
+- **Gradient Tracking & Backpropagation**: Methods like `.backward()`, `.detach()`, `.requires_grad_()`, and `.release()` for efficient autograd.
+- **Broadcasting**: Full support for NumPy-style broadcasting in Python.
+- **Optimizers**: Built-in SGD with plans for Momentum, Adam, and RMSprop.
+- **Device Support**: CPU backend with SIMD acceleration (via C backend).
+- **Utilities**: Tensor creation functions (`zeros`, `ones`, `rand`, `randn`) and reshaping (`reshape`, `flatten`, `permute`).
+- **Examples**: Includes an MLP training script on the MNIST dataset.
 
 ---
 
 ## 🚀 Quick Start
 
-1. **Clone and initialize**:
+1. **Clone and Initialize**:
     ```bash
     git clone https://github.com/heavyburnin/deepgrad.git
     cd deepgrad
@@ -26,37 +30,41 @@ A lightweight, low-level tensor library for building and training neural network
     pip install -r requirements.txt
     ```
 
-2. **Build the C backend**:
+2. **Build the C Backend**:
     ```bash
     cd ../simd-backend
     mkdir -p build && cd build
     cmake .. && make
-    # builds libsimd_tensor_backend.so
+    # Builds libsimd_tensor_backend.so
     ```
 
-3. **Run the example training script**:
+3. **Run the Example Training Script**:
     ```bash
-    cd ../deepgrad  # project root
+    cd ../deepgrad  # Project root
     python3 -m deepgrad.examples.train
     ```
 
     ✅ This will:
     - Convert `mnist_train.csv` to `.bin`
     - Initialize an MLP
-    - Train for a few epochs, printing loss & accuracy
+    - Train for a few epochs, printing loss and accuracy
 
 ---
 
 ## 🛠️ Project Organization
+
 ```bash
 deepgrad/
-├── tensor.py – Core Tensor class + ops
-├── ops.py – Operator registry (forward/backward function names)
-├── backend.py – ctypes bindings to libsimd_tensor_backend.so
-├── utils.py – Pure-Python helper functions
+├── tensor.py       – Core Tensor class with autograd and operations
+├── ops.py         – Operator registry (forward/backward function names)
+├── backend.py     – ctypes bindings to libsimd_tensor_backend.so
+├── broadcast.py   – Broadcasting utilities
+├── utils.py       – Pure-Python helper functions
+├── optimizer.py   – Optimizer implementations (e.g., SGD)
+├── model.py       – Model definitions (e.g., MLP)
 └── examples/
-├── model.py – Model definitions (e.g. MLP)
-└── train.py – Example training script
+    ├── model.py   – Example model definitions
+    └── train.py   – Example training script
 ```
 
 🧩 The C backend is assumed to be built at:
@@ -65,69 +73,93 @@ deepgrad/
 
 ---
 
-## 📦 Install for Development
-To avoid import and path issues later, install DeepGrad as an editable package:
-
-1. Create a `setup.py` or add a `pyproject.toml`
-2. Install in dev mode:
-    ```bash
-    pip install -e .
-    ```
-
----
 
 ## 🧠 Features & Usage
 
-- **Basic usage**:
-    ```python
-    from deepgrad.tensor import Tensor
-    import array
+### Basic Tensor Operations
+```python
+from deepgrad.tensor import Tensor
 
-    a = Tensor(array.array('f', [1,2,3]), requires_grad=True, shape=(3,))
-    b = Tensor(array.array('f', [0.1]), requires_grad=False, shape=(1,))
-    c = a + b
-    loss = c.sum()
-    loss.backward()
-    ```
+# Create tensors
+a = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+b = Tensor([0.1], requires_grad=False)
 
-- **Optimizer**:
-    ```python
-    from deepgrad.model import MLP
-    from deepgrad.optimizer import SGD
+# Perform operations
+c = a + b  # Broadcasting
+loss = c.sum()
+loss.backward()
+print(a.grad)  # Gradient of loss w.r.t. a
+```
 
-    model = MLP(...)
-    optimizer = SGD(model.parameters(), lr=0.01)
-    optimizer.step()
-    ```
+### Convolutional Neural Networks
+```python
+# 2D Convolution
+input = Tensor.randn((1, 3, 28, 28), requires_grad=True)  # Batch, Channels, Height, Width
+weight = Tensor.randn((16, 3, 3, 3))  # Out_channels, In_channels, Kernel_h, Kernel_w
+bias = Tensor.zeros((16,))
+output = input.conv2d(weight, bias, stride=(1, 1), padding=(1, 1))
+```
+
+### Pooling and Activation
+```python
+pooled = output.maxpool2d(kernel_size=(2, 2), stride=(2, 2))
+activated = pooled.relu()
+```
+
+### Loss and Optimization
+```python
+from deepgrad.model import MNISTNet
+from deepgrad.optimizer import SGD
+
+model = MNISTNet(input_dim=784, hidden_dims=[128, 64], output_dim=10)
+optimizer = SGD(model.parameters(), lr=0.01)
+
+# Forward pass
+pred = model(input)
+target = Tensor([0, 1, 2, ...], shape=(batch_size,))
+loss = pred.cross_entropy(target, label_smoothing=0.1)
+
+# Backward pass
+loss.backward()
+optimizer.step()
+```
+
+### Dropout for Regularization
+```python
+x = Tensor.randn((10, 100), requires_grad=True)
+x_dropped = x.dropout(p=0.5)  # Drops 50% of elements during training
+```
 
 ---
 
 ## 📊 Additions & TODOs
 
-- ⚡ **GPU support**: Extend `Tensor` to use `device="cuda"` and stub hooks in `backend.py`
-- 🧪 **More ops**: Support `log`, `exp`, `matmul-backward`, etc.
-- ✅ **Unit tests**: Validate correctness and gradient checking
-- 📚 **Data loaders**: Built-in MNIST/CIFAR support
-- 🎨 **Improved optimizers**: Momentum, Adam, RMSprop
+- ⚡ **GPU Support**: Extend `Tensor` to support `device="cuda"` with hooks in `backend.py`.
+- 🧪 **More Operations**: Add `log`, `exp`, `sigmoid`, and advanced matrix operations.
+- ✅ **Unit Tests**: Implement gradient checking and correctness tests in `tests/`.
+- 📚 **Data Loaders**: Add built-in support for MNIST, CIFAR-10, and other datasets.
+- 🎨 **Improved Optimizers**: Implement Momentum, Adam, and RMSprop.
+- 🔄 **Graph Optimization**: Enhance `release()` and `release_graph()` for memory efficiency.
 
 ---
 
 ## 📝 Contributing
 
-Feel free to:
+Contributions are welcome! You can:
 
-- Add new operators (`register_op` in `ops.py`)
-- Write unit tests (`tests/` directory)
-- Extend for GPU/backends
-- Open issues or PRs here on GitHub
+- Add new operators in `ops.py` using `register_op`.
+- Write unit tests in the `tests/` directory.
+- Extend backend support (e.g., GPU or other accelerators).
+- Open issues or PRs on GitHub.
 
 ---
 
 ## 🔐 License
+
 This project is licensed under the [MIT License](LICENSE).
 
 ---
 
 ## ❤️ Credits
 
-Built by **heavyburnin**, with inspiration from tinygrad and PyTorch tensor broadcasting & autograd systems.
+Built by **heavyburnin**, with inspiration from tinygrad and PyTorch tensor broadcasting and autograd systems.

@@ -8,7 +8,7 @@
 #include <immintrin.h>
 
 // You can define this in the header or externally as a compile-time constant
-#define MAX_CLASSES 1024
+#define MAX_CLASSES 2048 //1024
 
 // Horizontal sum of 8-float AVX vector
 float hsum256_ps(__m256 v);
@@ -35,17 +35,6 @@ float tensor_mean(const float* input, float* grad_out, size_t len);
 // - losses: output loss per batch item
 // - grad_input: gradient w.r.t. logits
 // - probs_out: optional output for softmax probs (or NULL)
-void tensor_softmax_ce_backup(
-    const float* logits,
-    const int* labels,
-    const float* grad_loss,  // Optional: NULL if not provided
-    float* losses,
-    float* grad_input,
-    float* probs_out,        // Optional: NULL if not needed
-    size_t batch,
-    size_t class_count
-);
-
 void tensor_softmax_ce(
     const float* logits,
     const int* labels,

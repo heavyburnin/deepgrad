@@ -862,7 +862,210 @@ class Tensor:
                 if hasattr(t, attr):
                     delattr(t, attr)
         _recurse(self)
-    
+
+    def permute(self, *axes) -> 'Tensor':
+        """
+        Permutes the dimensions of the tensor according to the specified axes.
+
+        Args:
+            *axes: The desired ordering of dimensions (e.g., (1, 0, 2) for a 3D tensor).
+
+        Returns:
+            Tensor: A new tensor with permuted dimensions.
+
+        Raises:
+            ValueError: If axes are invalid or incompatible with tensor shape.
+        """
+        if len(axes) != len(self.shape):
+            raise ValueError(f"Expected {len(self.shape)} axes, got {len(axes)}")
+        if sorted(axes) != list(range(len(self.shape))):
+            raise ValueError(f"Invalid axes {axes} for shape {self.shape}")
+
+        # Compute new shape
+        new_shape = tuple(self.shape[i] for i in axes)
+        out_size = self.size
+        out_data = (c_float * out_size)()
+
+        # Compute strides for input and output
+        in_strides = [1] * len(self.shape)
+        for i in range(len(self.shape) - 2, -1, -1):
+            in_strides[i] = in_strides[i + 1] * self.shape[i + 1]
+        
+        out_strides = [1] * len(new_shape)
+        for i in range(len(new_shape) - 2, -1, -1):
+            out_strides[i] = out_strides[i + 1] * new_shape[i + 1]
+
+        # Map indices
+        for idx in range(out_size):
+            # Convert flat index to multi-dimensional index in output
+            out_multi_idx = [0] * len(new_shape)
+            tmp = idx
+            for i in range(len(new_shape) - 1, -1, -1):
+                out_multi_idx[i] = tmp // out_strides[i]
+                tmp %= out_strides[i]
+            
+            # Map to input multi-dimensional index using axes
+            in_multi_idx = [0] * len(self.shape)
+            for i, ax in enumerate(axes):
+                in_multi_idx[ax] = out_multi_idx[i]
+            
+            # Convert input multi-dimensional index to flat index
+            in_idx = 0
+            for i in range(len(self.shape)):
+                in_idx += in_multi_idx[i] * in_strides[i]
+            
+            out_data[idx] = self.data[in_idx]
+
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=new_shape, size=out_size)
+
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    raise RuntimeError("Output gradient is None during permute backward")
+                if self.grad is None:
+                    self.grad = (c_float * self.size)()
+
+                # Inverse permutation: map output gradient back to input
+                for idx in range(out_size):
+                    out_multi_idx = [0] * len(new_shape)
+                    tmp = idx
+                    for i in range(len(new_shape) - 1, -1, -1):
+                        out_multi_idx[i] = tmp // out_strides[i]
+                        tmp %= out_strides[i]
+                    
+                    in_multi_idx = [0] * len(self.shape)
+                    for i, ax in enumerate(axes):
+                        in_multi_idx[ax] = out_multi_idx[i]
+                    
+                    in_idx = 0
+                    for i in range(len(self.shape)):
+                        in_idx += in_multi_idx[i] * in_strides[i]
+                    
+                    self.grad[in_idx] += out.grad[idx]
+
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
+
+    def log_softmax(self, dim: int = -1) -> 'Tensor':
+        """
+        Computes the log softmax along the specified dimension.
+
+        Args:
+            dim (int): Dimension along which to compute log softmax (default: -1, last dimension).
+
+        Returns:
+            Tensor: Log softmax of the input tensor along the specified dimension.
+
+        Raises:
+            ValueError: If dim is invalid or tensor is empty.
+        """
+        if not self.shape:
+            raise ValueError("Cannot compute log_softmax on empty tensor")
+        if dim >= len(self.shape) or dim < -len(self.shape):
+            raise ValueError(f"Dimension {dim} out of bounds for shape {self.shape}")
+
+        # Normalize negative dimension
+        dim = dim if dim >= 0 else dim + len(self.shape)
+
+        # Permute if dim is not the last dimension
+        need_permute = dim != len(self.shape) - 1
+        if need_permute:
+            axes = list(range(len(self.shape)))
+            axes[-1], axes[dim] = axes[dim], axes[-1]
+            x = self.permute(*axes)
+        else:
+            x = self
+
+        input_data = x.data
+        input_shape = x.shape
+        batch_size = reduce(mul, input_shape[:-1], 1) if len(input_shape) > 1 else 1
+        class_size = input_shape[-1]
+        out_data = (c_float * x.size)()
+
+        # Compute log softmax with numerical stability
+        for b in range(batch_size):
+            start = b * class_size
+            max_val = max(input_data[start:start + class_size])
+            exp_sum = sum(math.exp(input_data[start + i] - max_val) for i in range(class_size))
+            log_sum = max_val + math.log(exp_sum) if exp_sum > 0 else float('-inf')
+            for i in range(class_size):
+                out_data[start + i] = input_data[start + i] - log_sum
+
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=x.shape, size=x.size)
+
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    raise RuntimeError("Output gradient is None during log_softmax backward")
+                if x.grad is None:
+                    x.grad = (c_float * x.size)()
+
+                # Compute softmax and gradient
+                for b in range(batch_size):
+                    start = b * class_size
+                    max_val = max(input_data[start:start + class_size])
+                    exp_sum = sum(math.exp(input_data[start + i] - max_val) for i in range(class_size))
+                    softmax = [(math.exp(input_data[start + i] - max_val) / exp_sum if exp_sum > 0 else 0.0)
+                            for i in range(class_size)]
+                    grad_sum = sum(out.grad[start + i] for i in range(class_size))
+                    for i in range(class_size):
+                        x.grad[start + i] = out.grad[start + i] - softmax[i] * grad_sum
+
+                # Handle gradient permutation if needed
+                if need_permute:
+                    grad_tensor = Tensor(x.grad, shape=x.shape, size=x.size, requires_grad=False)
+                    grad_tensor = grad_tensor.permute(*axes)
+                    if self.grad is None:
+                        self.grad = (c_float * self.size)()
+                    SimdTensorBackend.tensor_add_inplace(self.grad, grad_tensor.data, self.size)
+                else:
+                    if self.grad is None:
+                        self.grad = (c_float * self.size)()
+                    SimdTensorBackend.tensor_add_inplace(self.grad, x.grad, self.size)
+
+            out._backward = _backward
+            out._prev = [self]
+
+        # Permute output back to original shape if needed
+        if need_permute:
+            out = out.permute(*axes)
+
+        return out
+
+    def tanh(self) -> 'Tensor':
+        """
+        Applies the hyperbolic tangent (tanh) activation function element-wise.
+
+        Returns:
+            Tensor with tanh applied.
+
+        Notes:
+            The gradient of tanh(x) is 1 - tanh(x)^2.
+        """
+        out_data = (c_float * self.size)()
+        for i in range(self.size):
+            out_data[i] = math.tanh(self.data[i])
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape, size=self.size)
+
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    raise RuntimeError("Output gradient is None during tanh backward")
+                if self.grad is None:
+                    self.grad = (c_float * self.size)()
+                tmp = (c_float * self.size)()
+                for i in range(self.size):
+                    tanh_x = out.data[i]
+                    tmp[i] = out.grad[i] * (1.0 - tanh_x * tanh_x)
+                SimdTensorBackend.tensor_add_inplace(self.grad, tmp, self.size)
+
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
+
     def dropout(self, p: float) -> 'Tensor':
         """
         Applies dropout with probability p during training.
@@ -902,7 +1105,7 @@ class Tensor:
             out._prev = [self]
             
         return out
-    
+
     def backward(self) -> None:
         """
         Computes gradients via reverse-mode autodiff.
@@ -960,8 +1163,7 @@ def zeros(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Te
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    data = (c_float * size)()
-    SimdTensorBackend.tensor_fill_zeros(data, size)
+    data = (c_float * size)(0.0)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
@@ -977,8 +1179,7 @@ def ones(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     """
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
-    data = (c_float * size)()
-    SimdTensorBackend.tensor_fill_ones(data, size)
+    data = (c_float * size)(*[1.0] * size)
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Tensor:
@@ -995,7 +1196,8 @@ def rand(shape: Union[int, Tuple[int, ...]], requires_grad: bool = False) -> Ten
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
     data = (c_float * size)()
-    SimdTensorBackend.tensor_fill_rand(data, size)
+    for i in range(size):
+        data[i] = random.random()
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def randn(shape: Union[int, Tuple[int, ...]], mean: float = 0.0, std: float = 1.0, requires_grad: bool = False) -> Tensor:
@@ -1014,7 +1216,11 @@ def randn(shape: Union[int, Tuple[int, ...]], mean: float = 0.0, std: float = 1.
     shape = (shape,) if isinstance(shape, int) else shape
     size = reduce(mul, shape, 1)
     data = (c_float * size)()
-    SimdTensorBackend.tensor_fill_randn(data, size, mean, std)
+    for i in range(size):
+        # Box-Muller transform for normal distribution
+        u1, u2 = random.random(), random.random()
+        z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+        data[i] = mean + std * z
     return Tensor(data, requires_grad=requires_grad, shape=shape, size=size)
 
 def from_ctypes(ptr, shape, size, requires_grad=False):

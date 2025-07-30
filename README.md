@@ -15,7 +15,7 @@ A lightweight, low-level tensor library for building and training neural network
 - **Optimizers**: Built-in SGD with plans for Momentum, Adam, and RMSprop.
 - **Device Support**: CPU backend with SIMD acceleration (via C backend).
 - **Utilities**: Tensor creation functions (`zeros`, `ones`, `rand`, `randn`) and reshaping (`reshape`, `flatten`, `permute`).
-- **Examples**: Includes an MLP training script on the MNIST dataset.
+- **Examples**: Includes an MNISTNet training script on the MNIST dataset.
 
 ---
 
@@ -46,7 +46,7 @@ A lightweight, low-level tensor library for building and training neural network
 
     ✅ This will:
     - Convert `mnist_train.csv` to `.bin`
-    - Initialize an MLP
+    - Initialize an ConvNet
     - Train for a few epochs, printing loss and accuracy
 
 ---
@@ -61,7 +61,7 @@ deepgrad/
 ├── broadcast.py   – Broadcasting utilities
 ├── utils.py       – Pure-Python helper functions
 ├── optimizer.py   – Optimizer implementations (e.g., SGD)
-├── model.py       – Model definitions (e.g., MLP)
+├── model.py       – Model definitions (e.g., MNISTNet, FashionNet)
 └── examples/
     ├── model.py   – Example model definitions
     └── train.py   – Example training script

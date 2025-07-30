@@ -46,7 +46,7 @@ class SGD:
                     c_float(self.lr)
                 )
 
-    def zero_grad_c(self):
+    def zero_grad(self):
         for param in self.parameters:
             if param.requires_grad and param.grad is not None:
                 SimdTensorBackend.zero_float_array(
@@ -88,7 +88,7 @@ class Adam:
                 c_int(self.t)
             )
 
-    def zero_grad_c(self):
+    def zero_grad(self):
         for param in self.parameters:
             if param.requires_grad and param.grad is not None:
                 SimdTensorBackend.zero_float_array(param.grad, param.size)
@@ -131,7 +131,7 @@ class AdamW:
                 c_float(self.weight_decay),
             )
 
-    def zero_grad_c(self):
+    def zero_grad(self):
         for param in self.parameters:
             if param.requires_grad and param.grad is not None:
                 SimdTensorBackend.zero_float_array(param.grad, param.size)

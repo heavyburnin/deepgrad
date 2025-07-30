@@ -1,19 +1,7 @@
-deepgrad/examples/datasets/mnist_train.csv
-deepgrad/examples/datasets/mnist_train.bin
-
-deepgrad/examples/datasets/mnist_test.csv
-deepgrad/examples/datasets/mnist_test.bin
-
-deepgrad/examples/datasets/fashion_mnist_train.csv
-deepgrad/examples/datasets/fashion_mnist_train.bin
-
-deepgrad/examples/datasets/fashion_mnist_test.csv
-deepgrad/examples/datasets/fashion_mnist_test.bin
-
-deepgrad/examples/datasets/lichess.pgn
-
+deepgrad/examples/datasets/
 deepgrad/examples/mnist_model.pkl
 deepgrad/examples/fashion_model.pkl
+deepgrad/examples/models/
 
 deepgrad/venv
 __pycache__

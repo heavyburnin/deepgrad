@@ -1,0 +1,164 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Game with AI</title>
+    <!-- Chessboard.js CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" integrity="sha384-q94+BZtLrkL1/ohfjR8c6L+A6qzNH9R2hBLwyoAfu3i/WCvQjzL2RQJ3uNHDISdU" crossorigin="anonymous">    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js" integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
+    <!-- Chess.js -->
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js" integrity="sha384-ZvpUoO/+PpLXR1lu4jmpXWu80pZlYUAfxl5NsBMWOEPSjUn/6Z/hRTt8+pR6L4N2" crossorigin="anonymous"></script>    
+        <!-- Chessboard.js -->
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js" integrity="sha384-8Vi8VHwn3vjQ9eUHUxex3JSN/NFqUg3QbPyX8kWyb93+8AC/pPWTzj+nHtbC5bxD" crossorigin="anonymous"></script>    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        #board {
+            width: 400px;
+            margin-bottom: 20px;
+        }
+        #status {
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+        #fen {
+            font-size: 14px;
+            color: #555;
+            margin-bottom: 10px;
+            word-break: break-all;
+            max-width: 400px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Chess Game vs AI</h1>
+    <div id="board"></div>
+    <p>Status: <span id="status">White to move</span></p>
+    <p>FEN: <span id="fen"></span></p>
+    <button onclick="resetBoard()">Reset Game</button>
+    <script>
+        var board = null;
+        var game = new Chess();
+        var $status = $('#status');
+        var $fen = $('#fen');
+
+        // Update board and status
+        function updateStatus() {
+            if (game.game_over()) {
+                if (game.in_checkmate()) {
+                    $status.text('Game Over: ' + (game.turn() === 'w' ? 'Black wins' : 'White wins'));
+                } else if (game.in_draw()) {
+                    $status.text('Game Over: Draw');
+                } else if (game.in_stalemate()) {
+                    $status.text('Game Over: Stalemate');
+                } else if (game.in_threefold_repetition()) {
+                    $status.text('Game Over: Draw by threefold repetition');
+                }
+            } else {
+                $status.text(game.turn() === 'w' ? 'White to move' : 'Black to move');
+            }
+            $fen.text(game.fen());
+            board.position(game.fen());
+        }
+
+        // Prevent illegal moves
+        function onDragStart(source, piece, position, orientation) {
+            if (game.game_over()) return false;
+            // Only allow white pieces to be moved (human plays as White)
+            if (game.turn() === 'b' || piece.search(/^b/) !== -1) return false;
+        }
+
+        // Handle human move
+        function onDrop(source, target) {
+            var move = game.move({
+                from: source,
+                to: target,
+                promotion: 'q' // Auto-promote to queen for simplicity
+            });
+            if (move === null) {
+                $status.text('Illegal move');
+                setTimeout(() => updateStatus(), 1000);
+                return 'snapback';
+            }
+            updateStatus();
+            // Trigger AI move after human move
+            setTimeout(makeAIMove, 250);
+        }
+
+        // Send move to backend and get AI response
+        function makeAIMove() {
+            if (game.game_over()) return;
+            $.ajax({
+                url: '/move',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    fen: game.fen(),
+                    move: game.history({ verbose: true }).slice(-1)[0]?.san || null
+                }),
+                success: function(data) {
+                    if (data.error) {
+                        $status.text('Error: ' + data.error).addClass('error');
+                        setTimeout(() => updateStatus(), 2000);
+                        return;
+                    }
+                    if (data.status) {
+                        $status.text(data.status);
+                        $fen.text(data.fen);
+                        board.position(data.fen);
+                        return;
+                    }
+                    game.move(data.move, { sloppy: true });
+                    updateStatus();
+                },
+                error: function(xhr, status, error) {
+                    $status.text('Error: Failed to communicate with server').addClass('error');
+                    setTimeout(() => updateStatus(), 2000);
+                }
+            });
+        }
+
+        // Reset the game
+        function resetBoard() {
+            game = new Chess();
+            updateStatus();
+        }
+
+        // Initialize board
+        var cfg = {
+            draggable: true,
+            position: 'start',
+            onDragStart: onDragStart,
+            onDrop: onDrop,
+            orientation: 'white' // Human plays as White
+        };
+        board = Chessboard('board', cfg);
+        updateStatus();
+    </script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9668e61b0f823346',t:'MTc1Mzc1MzEyOC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

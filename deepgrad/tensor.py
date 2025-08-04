@@ -152,12 +152,13 @@ class Tensor:
             other = Tensor(other_data, shape=(1,), requires_grad=False)
 
         s1, s2 = self.shape, other.shape
-        max_rank = max(len(s1), len(s2))
-        shape1 = (1,) * (max_rank - len(s1)) + s1
-        shape2 = (1,) * (max_rank - len(s2)) + s2
+        try:
+            out_shape = compute_broadcast_shape(s1, s2)
+        except ValueError as e:
+            raise ValueError(f"Incompatible shapes for broadcasting: {s1} and {s2}") from e
+        out_size = reduce(mul, out_shape, 1)
 
-        out_shape = compute_broadcast_shape(shape1, shape2)
-
+        # Broadcast data to the output shape
         a_broadcasted = (
             self.data if self.shape == out_shape 
             else broadcast_to_shape(self.data, self.shape, out_shape, self.size)
@@ -167,9 +168,9 @@ class Tensor:
             else broadcast_to_shape(other.data, other.shape, out_shape, other.size)
         )
 
-        out_size = reduce(mul, out_shape, 1)
         out_data = (c_float * out_size)()
 
+        # Determine if batch processing is needed
         if len(out_shape) > 1:
             batch_size = out_shape[0]
             n = reduce(mul, out_shape[1:], 1)
@@ -179,6 +180,7 @@ class Tensor:
             n = out_size
             use_batch = False
 
+        # Perform the operation
         getattr(SimdTensorBackend, op_name)(
             a_broadcasted,
             b_broadcasted,
@@ -187,7 +189,7 @@ class Tensor:
             batch_size if use_batch else 0
         )
 
-        out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape)
+        out = Tensor(out_data, requires_grad=self.requires_grad or other.requires_grad, shape=out_shape, size=out_size)
 
         if out.requires_grad:
             out._cached_a_broadcasted = a_broadcasted
@@ -212,7 +214,7 @@ class Tensor:
                     grad_fn(out_grad, a_broadcasted, b_broadcasted, self_grad, other_grad, n, 0)
 
                 if self.requires_grad:
-                    grad_contrib = unbroadcast_grad(self_grad, out.shape, self.shape)
+                    grad_contrib = unbroadcast_grad(self_grad, out_shape, self.shape)
                     if len(grad_contrib) != self.size:
                         raise ValueError(f"Gradient size mismatch: expected {self.size}, got {len(grad_contrib)}")
                     if self._grad is None:
@@ -221,7 +223,7 @@ class Tensor:
                         SimdTensorBackend.tensor_add_inplace(self._grad, grad_contrib, self.size)
 
                 if other.requires_grad:
-                    grad_contrib = unbroadcast_grad(other_grad, out.shape, other.shape)
+                    grad_contrib = unbroadcast_grad(other_grad, out_shape, other.shape)
                     if len(grad_contrib) != other.size:
                         raise ValueError(f"Gradient size mismatch: expected {other.size}, got {len(grad_contrib)}")
                     if other._grad is None:
@@ -251,9 +253,37 @@ class Tensor:
         other_t = other if isinstance(other, Tensor) else Tensor([other], shape=(1,), requires_grad=False)
         return other_t.__truediv__(self)
     def __pow__(self, other): return self._binary_op(other, 'pow')
-    def __rpow__(self, other):
+    def __rpow__(self, other):  
         other_t = other if isinstance(other, Tensor) else Tensor([other], shape=(1,), requires_grad=False)
         return other_t.__pow__(self)
+
+    def __neg__(self) -> 'Tensor':
+        """
+        Returns a new tensor with all elements negated.
+
+        Returns:
+            Tensor: A new tensor with negated values.
+        """
+        # Allocate memory for the output tensor data and perform negation
+        out_data = (c_float * self.size)(*[-self.data[i] for i in range(self.size)])
+        
+        # Create a new Tensor with the negated data
+        out = Tensor(out_data, requires_grad=self.requires_grad, shape=self.shape, size=self.size)
+
+        # Handle gradient computation if required
+        if self.requires_grad:
+            def _backward():
+                if out.grad is None:
+                    return
+                if self.grad is None:
+                    self.grad = (c_float * self.size)()
+                # Gradient of -x is -1, so accumulate -out.grad into self.grad
+                for i in range(self.size):
+                    self.grad[i] += -out.grad[i]
+            out._backward = _backward
+            out._prev = [self]
+
+        return out
 
     def reshape(self, new_shape: Tuple[int, ...]) -> 'Tensor':
         """

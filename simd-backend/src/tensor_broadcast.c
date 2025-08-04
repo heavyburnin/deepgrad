@@ -136,21 +136,24 @@ void broadcast_to_shape(
     int from_size,
     float* out
 ) {
-    int rank_diff = ndim_to - ndim_from;
+    if (!data || !out) {
+        fprintf(stderr, "Error: NULL pointer passed to broadcast_to_shape\n");
+        return;
+    }
 
-    // Pad from_shape on the left with ones to match ndim_to
-    int padded_from_shape[16];  // Max supported rank
+    // Pad from_shape with leading 1s
+    int padded_from_shape[16];
+    int rank_diff = ndim_to - ndim_from;
     for (int i = 0; i < rank_diff; ++i)
         padded_from_shape[i] = 1;
     for (int i = 0; i < ndim_from; ++i)
         padded_from_shape[rank_diff + i] = from_shape[i];
 
-    // Compute strides for source and output tensors
+    // Compute strides
     int src_strides[16];
     int out_strides[16];
     src_strides[ndim_to - 1] = 1;
     out_strides[ndim_to - 1] = 1;
-
     for (int i = ndim_to - 2; i >= 0; --i) {
         src_strides[i] = src_strides[i + 1] * padded_from_shape[i + 1];
         out_strides[i] = out_strides[i + 1] * to_shape[i + 1];
@@ -161,8 +164,8 @@ void broadcast_to_shape(
     for (int i = 0; i < ndim_to; ++i)
         out_size *= to_shape[i];
 
-    // Parallelize outer loop with OpenMP
-    #pragma omp parallel for
+    // General broadcast
+    #pragma omp parallel for schedule(static)
     for (int out_idx = 0; out_idx < out_size; ++out_idx) {
         int remaining = out_idx;
         int src_index = 0;
@@ -170,12 +173,10 @@ void broadcast_to_shape(
         for (int i = 0; i < ndim_to; ++i) {
             int coord = remaining / out_strides[i];
             remaining %= out_strides[i];
-
-            // Use 0 if dimension is broadcasted (size 1), else use coord
             int src_coord = (padded_from_shape[i] == 1) ? 0 : coord;
             src_index += src_coord * src_strides[i];
         }
-        // Wrap around from_size just in case
-        out[out_idx] = data[src_index % from_size];
+
+        out[out_idx] = data[src_index];  // Corrected: removed % from_size
     }
 }

@@ -1,5 +1,7 @@
 from deepgrad.backend import SimdTensorBackend
-from functools import lru_cache
+from operator import mul
+from functools import lru_cache, reduce
+from typing import Tuple
 from ctypes import cast, c_float, c_int, c_size_t, POINTER
 c_float_p = POINTER(c_float)
 
@@ -15,36 +17,40 @@ def set_broadcasted(key, value):
     _broadcast_cache[key] = value
 
 @lru_cache(maxsize=128)
-def compute_broadcast_shape(shape1, shape2):
+def compute_broadcast_shape(shape1: Tuple[int, ...], shape2: Tuple[int, ...]) -> Tuple[int, ...]:
+    """
+    Computes the broadcasted shape for two tensors using NumPy-style broadcasting rules.
+    Shapes are aligned from the right, and dimensions are compatible if they are equal or one is 1.
+    """
+    # Determine the maximum number of dimensions
+    max_len = max(len(shape1), len(shape2))
+    
+    # Pad shapes with ones on the left to match max_len
+    s1 = (1,) * (max_len - len(shape1)) + shape1
+    s2 = (1,) * (max_len - len(shape2)) + shape2
+    
     out_shape = []
-    for dim1, dim2 in zip(shape1, shape2):
-        if dim1 == dim2:
-            out_shape.append(dim1)
-        elif dim1 == 1:
-            out_shape.append(dim2)
-        elif dim2 == 1:
-            out_shape.append(dim1)
+    for d1, d2 in zip(s1, s2):
+        if d1 == d2 or d1 == 1 or d2 == 1:
+            out_shape.append(max(d1, d2))
         else:
             raise ValueError(f"Incompatible shapes for broadcasting: {shape1} and {shape2}")
+    
     return tuple(out_shape)
 
-from deepgrad.backend import SimdTensorBackend
-from ctypes import cast, c_float, c_int, c_size_t, POINTER
 c_float_p = POINTER(c_float)
 
 def broadcast_to_shape(data, from_shape, to_shape, from_size):
-    # Validate shapes for broadcasting
+    """
+    Broadcasts data from from_shape to to_shape using NumPy-style broadcasting.
+    """    
     ndim_from = len(from_shape)
     ndim_to = len(to_shape)
     
     # Pad from_shape with leading 1's to match to_shape's rank
     from_shape_padded = (1,) * (ndim_to - ndim_from) + from_shape
     
-    # Check rank compatibility
-    if len(from_shape_padded) != ndim_to:
-        raise ValueError(f"Cannot broadcast shape {from_shape} to {to_shape}: rank mismatch")
-    
-    # Check dimension compatibility
+    # Validate dimension compatibility
     for orig_dim, target_dim in zip(from_shape_padded, to_shape):
         if orig_dim != 1 and orig_dim != target_dim:
             raise ValueError(f"Cannot broadcast shape {from_shape} to {to_shape}: dimension {orig_dim} incompatible with {target_dim}")
@@ -54,23 +60,19 @@ def broadcast_to_shape(data, from_shape, to_shape, from_size):
         return data
 
     # Compute output size
-    out_size = 1
-    for dim in to_shape:
-        out_size *= dim
-
-    # Prepare output buffer
+    out_size = reduce(mul, to_shape, 1)
     out = (c_float * out_size)()
 
-    # Convert shapes to ctypes arrays
-    from_shape_arr = (c_int * ndim_from)(*from_shape) if ndim_from > 0 else None
-    to_shape_arr = (c_int * ndim_to)(*to_shape)
-
-    # If scalar input, fill the buffer directly
+    # Handle scalar input
     if ndim_from == 0 or from_size == 1:
         val = data[0]
         for i in range(out_size):
             out[i] = val
         return out
+
+    # Convert shapes to ctypes arrays
+    from_shape_arr = (c_int * ndim_from)(*from_shape) if ndim_from > 0 else None
+    to_shape_arr = (c_int * ndim_to)(*to_shape)
 
     # Call backend function
     SimdTensorBackend.broadcast_to_shape(
@@ -82,7 +84,6 @@ def broadcast_to_shape(data, from_shape, to_shape, from_size):
         c_size_t(from_size),
         out
     )
-
     return out
 
 def broadcast_data(data, from_shape, to_shape):
